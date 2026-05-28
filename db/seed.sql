@@ -4,7 +4,7 @@
 -- Run this after schema.sql
 -- ============================================================
 
-USE pathfinder_tracker;
+USE pythfinder_tracker;
 
 -- ============================================================
 -- STATS

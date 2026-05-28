@@ -3,11 +3,11 @@
 -- Schema v1.0
 -- ============================================================
 
-CREATE DATABASE IF NOT EXISTS pathfinder_tracker
+CREATE DATABASE IF NOT EXISTS pythfinder_tracker
     CHARACTER SET utf8mb4
     COLLATE utf8mb4_unicode_ci;
 
-USE pathfinder_tracker;
+USE pythfinder_tracker;
 
 -- ============================================================
 -- CAMPAIGNS

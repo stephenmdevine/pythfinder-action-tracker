@@ -87,23 +87,41 @@ class BonusTypeModel(BaseModel):
         """
         sql = """
             SELECT
-                e.id            AS effect_id,
+                e.id                AS effect_id,
                 e.modifier,
+                e.pool_allocation_id,
                 e.condition_note,
-                bt.name         AS bonus_type_name,
+                bt.name             AS bonus_type_name,
                 bt.always_stacks,
-                s.name          AS source_name
+                s.name              AS source_name,
+                -- For pool-linked effects, pull the user-entered active modifier.
+                -- COALESCE falls back to e.modifier for fixed effects (eam row won't exist).
+                COALESCE(eam.current_modifier, e.modifier) AS resolved_modifier
             FROM character_sources cs
-            JOIN effects e     ON e.source_id    = cs.source_id
-            JOIN bonus_types bt ON bt.id         = e.bonus_type_id
-            JOIN sources s     ON s.id           = e.source_id
+            JOIN effects e          ON e.source_id    = cs.source_id
+            JOIN bonus_types bt     ON bt.id          = e.bonus_type_id
+            JOIN sources s          ON s.id           = e.source_id
+            LEFT JOIN effect_active_modifiers eam
+                                    ON eam.effect_id  = e.id
+                                   AND eam.character_id = %s
             WHERE cs.character_id = %s
               AND cs.is_active    = TRUE
               AND e.stat_id       = %s
         """
         with self.get_db() as (conn, cursor):
-            cursor.execute(sql, (character_id, stat_id))
-            effects = cursor.fetchall()
+            cursor.execute(sql, (character_id, character_id, stat_id))
+            raw_effects = cursor.fetchall()
+
+        # Normalise: use resolved_modifier as the working modifier value.
+        # Filter out pool-linked effects where no investment has been made yet (modifier = 0
+        # and pool_allocation_id is set) — a 0-point investment contributes nothing.
+        effects = []
+        for e in raw_effects:
+            e = dict(e)
+            e["modifier"] = e["resolved_modifier"]
+            if e["pool_allocation_id"] is not None and e["modifier"] == 0:
+                continue
+            effects.append(e)
 
         # Determine which typed bonuses are suppressed
         typed_best: dict[str, int] = {}
