@@ -76,7 +76,8 @@ class BonusTypeModel(BaseModel):
     ) -> dict:
         """
         Full pipeline: fetches all active effects targeting a stat for a
-        character, runs resolve_modifiers(), and returns a breakdown dict:
+        character, resolves all three effect types, runs resolve_modifiers(),
+        and returns a breakdown dict:
 
         {
             "stat_id":       int,
@@ -84,26 +85,37 @@ class BonusTypeModel(BaseModel):
             "effects":       [list of contributing effect rows],
             "suppressed":    [list of effects that lost to a higher typed bonus]
         }
+
+        Effect type resolution:
+          Fixed:             uses e.modifier directly
+          Investment-scaled: uses eam.current_modifier (user-entered)
+          Formula-scaled:    computes base_value + floor((stat_value * multiplier) / divisor)
+                             where stat_value is the character's current resolved value
+                             for scaling_stat_id
         """
         sql = """
             SELECT
-                e.id                AS effect_id,
+                e.id                    AS effect_id,
                 e.modifier,
                 e.pool_allocation_id,
                 e.condition_note,
-                bt.name             AS bonus_type_name,
+                e.base_value,
+                e.scaling_stat_id,
+                e.multiplier,
+                e.divisor,
+                bt.name                 AS bonus_type_name,
                 bt.always_stacks,
-                s.name              AS source_name,
-                -- For pool-linked effects, pull the user-entered active modifier.
-                -- COALESCE falls back to e.modifier for fixed effects (eam row won't exist).
-                COALESCE(eam.current_modifier, e.modifier) AS resolved_modifier
+                s.name                  AS source_name,
+                eam.current_modifier    AS investment_modifier,
+                sc_stat.name            AS scaling_stat_name
             FROM character_sources cs
-            JOIN effects e          ON e.source_id    = cs.source_id
-            JOIN bonus_types bt     ON bt.id          = e.bonus_type_id
-            JOIN sources s          ON s.id           = e.source_id
+            JOIN effects e              ON e.source_id     = cs.source_id
+            JOIN bonus_types bt         ON bt.id           = e.bonus_type_id
+            JOIN sources s              ON s.id            = e.source_id
             LEFT JOIN effect_active_modifiers eam
-                                    ON eam.effect_id  = e.id
-                                   AND eam.character_id = %s
+                                        ON eam.effect_id   = e.id
+                                       AND eam.character_id = %s
+            LEFT JOIN stats sc_stat     ON sc_stat.id      = e.scaling_stat_id
             WHERE cs.character_id = %s
               AND cs.is_active    = TRUE
               AND e.stat_id       = %s
@@ -112,18 +124,37 @@ class BonusTypeModel(BaseModel):
             cursor.execute(sql, (character_id, character_id, stat_id))
             raw_effects = cursor.fetchall()
 
-        # Normalise: use resolved_modifier as the working modifier value.
-        # Filter out pool-linked effects where no investment has been made yet (modifier = 0
-        # and pool_allocation_id is set) — a 0-point investment contributes nothing.
+        # Resolve each effect to a working integer modifier
         effects = []
-        for e in raw_effects:
-            e = dict(e)
-            e["modifier"] = e["resolved_modifier"]
-            if e["pool_allocation_id"] is not None and e["modifier"] == 0:
-                continue
+        for row in raw_effects:
+            e = dict(row)
+
+            if e["scaling_stat_id"] is not None:
+                # Formula-scaled: base_value + floor((stat_value * multiplier) / divisor)
+                stat_value = self._get_base_stat_value(character_id, e["scaling_stat_id"])
+                base       = e["base_value"] or 0
+                computed   = base + int((stat_value * float(e["multiplier"])) / e["divisor"])
+                e["modifier"] = computed
+                e["modifier_display"] = (
+                    f"{base:+d} + floor({e['scaling_stat_name']} "
+                    f"× {e['multiplier']} ÷ {e['divisor']}) = {computed:+d}"
+                )
+
+            elif e["pool_allocation_id"] is not None:
+                # Investment-scaled: user-entered value
+                inv = e["investment_modifier"]
+                if inv is None or inv == 0:
+                    continue   # uninvested — contributes nothing
+                e["modifier"] = inv
+                e["modifier_display"] = f"{inv:+d} (invested)"
+
+            else:
+                # Fixed modifier
+                e["modifier_display"] = f"{e['modifier']:+d}"
+
             effects.append(e)
 
-        # Determine which typed bonuses are suppressed
+        # Determine suppressed typed bonuses
         typed_best: dict[str, int] = {}
         for e in effects:
             if e["modifier"] >= 0 and not e["always_stacks"]:
@@ -131,8 +162,7 @@ class BonusTypeModel(BaseModel):
                 if name not in typed_best or e["modifier"] > typed_best[name]:
                     typed_best[name] = e["modifier"]
 
-        contributing = []
-        suppressed   = []
+        contributing, suppressed = [], []
         for e in effects:
             if e["modifier"] >= 0 and not e["always_stacks"]:
                 if e["modifier"] < typed_best.get(e["bonus_type_name"], 0):
@@ -146,6 +176,26 @@ class BonusTypeModel(BaseModel):
             "effects":      contributing,
             "suppressed":   suppressed,
         }
+
+    def _get_base_stat_value(self, character_id: int, stat_id: int) -> int:
+        """
+        Returns a character's base value for a stat, used when evaluating
+        formula-scaled effects. Reads directly from character_stats.
+
+        Note: this intentionally uses the base value only, not the fully
+        resolved value, to avoid circular resolution (a stat that scales
+        off itself). For ability modifiers as the scaling stat, the user
+        should select the modifier stat (e.g. 'STR Mod') not the score,
+        and ensure that stat's base value reflects the current modifier.
+        """
+        sql = """
+            SELECT base_value FROM character_stats
+            WHERE character_id = %s AND stat_id = %s
+        """
+        with self.get_db() as (conn, cursor):
+            cursor.execute(sql, (character_id, stat_id))
+            row = cursor.fetchone()
+            return row["base_value"] if row else 0
 
 
 class EffectModel(BaseModel):
@@ -163,22 +213,41 @@ class EffectModel(BaseModel):
         source_id: int,
         stat_id: int,
         bonus_type_id: int,
-        modifier: int,
+        modifier: int = None,
         condition_note: str = "",
+        base_value: int = None,
+        scaling_stat_id: int = None,
+        multiplier: float = 1.0,
+        divisor: int = 1,
     ) -> int:
         """
         Adds an effect to a source. Returns the new effect id.
 
+        Exactly one effect type must be specified:
+          Fixed:             pass modifier (int)
+          Formula-scaled:    pass scaling_stat_id; optionally base_value,
+                             multiplier, divisor
+          Investment-scaled: pass neither — call set_pool_allocation() after
+
         modifier: positive = bonus, negative = penalty.
-        condition_note: free-text reminder for the user, e.g.
-            "Only applies on attack rolls against flat-footed targets."
+        condition_note: free-text reminder, e.g.
+            "Only on attack rolls against flat-footed targets."
+        base_value: flat addend for formula effects (default 0).
+        scaling_stat_id: FK to stats — the stat whose value drives scaling.
+        multiplier: scaling factor applied to the stat value (default 1.0).
+        divisor: divisor applied after multiplying (default 1).
         """
         sql = """
-            INSERT INTO effects (source_id, stat_id, bonus_type_id, modifier, condition_note)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO effects
+                (source_id, stat_id, bonus_type_id, modifier, condition_note,
+                 base_value, scaling_stat_id, multiplier, divisor)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         with self.get_db() as (conn, cursor):
-            cursor.execute(sql, (source_id, stat_id, bonus_type_id, modifier, condition_note))
+            cursor.execute(sql, (
+                source_id, stat_id, bonus_type_id, modifier, condition_note,
+                base_value, scaling_stat_id, multiplier, divisor
+            ))
             return cursor.lastrowid
 
     # ------------------------------------------------------------------
@@ -202,13 +271,19 @@ class EffectModel(BaseModel):
     def get_by_source(self, source_id: int) -> list[dict]:
         """
         Returns all effects for a given source, with stat and bonus type names.
+        Uses effect_id alias to keep dict shape consistent with all other queries.
         """
         sql = """
-            SELECT e.*, st.name AS stat_name, st.abbreviation,
-                   bt.name AS bonus_type_name, bt.always_stacks
+            SELECT e.id AS effect_id, e.source_id, e.stat_id, e.bonus_type_id,
+                   e.modifier, e.condition_note, e.pool_allocation_id,
+                   e.base_value, e.scaling_stat_id, e.multiplier, e.divisor,
+                   st.name AS stat_name, st.abbreviation,
+                   bt.name AS bonus_type_name, bt.always_stacks,
+                   sc.name AS scaling_stat_name
             FROM effects e
-            JOIN stats       st ON st.id = e.stat_id
-            JOIN bonus_types bt ON bt.id = e.bonus_type_id
+            JOIN stats       st  ON st.id  = e.stat_id
+            JOIN bonus_types bt  ON bt.id  = e.bonus_type_id
+            LEFT JOIN stats  sc  ON sc.id  = e.scaling_stat_id
             WHERE e.source_id = %s
             ORDER BY st.category ASC, st.name ASC
         """
@@ -220,30 +295,56 @@ class EffectModel(BaseModel):
         """
         Returns every active effect currently applying to a character,
         across all active sources. Used for a full character modifier summary.
+
+        All three effect types are included. Formula-scaled effects include
+        raw scaling parameters — the caller (controller or view) is responsible
+        for evaluating the formula using current stat values if a computed
+        display value is needed. For fully resolved values per stat, use
+        BonusTypeModel.resolve_modifiers_for_stat() instead.
         """
         sql = """
             SELECT
-                e.id            AS effect_id,
+                e.id                    AS effect_id,
                 e.modifier,
+                e.pool_allocation_id,
+                e.base_value,
+                e.scaling_stat_id,
+                e.multiplier,
+                e.divisor,
                 e.condition_note,
-                st.id           AS stat_id,
-                st.name         AS stat_name,
+                st.id                   AS stat_id,
+                st.name                 AS stat_name,
                 st.abbreviation,
-                bt.name         AS bonus_type_name,
+                bt.name                 AS bonus_type_name,
                 bt.always_stacks,
-                s.name          AS source_name
+                s.name                  AS source_name,
+                sc_stat.name            AS scaling_stat_name,
+                COALESCE(eam.current_modifier, e.modifier) AS resolved_modifier
             FROM character_sources cs
-            JOIN effects     e  ON e.source_id  = cs.source_id
-            JOIN stats       st ON st.id         = e.stat_id
-            JOIN bonus_types bt ON bt.id         = e.bonus_type_id
-            JOIN sources     s  ON s.id          = e.source_id
+            JOIN effects     e      ON e.source_id    = cs.source_id
+            JOIN stats       st     ON st.id           = e.stat_id
+            JOIN bonus_types bt     ON bt.id           = e.bonus_type_id
+            JOIN sources     s      ON s.id            = e.source_id
+            LEFT JOIN stats sc_stat ON sc_stat.id      = e.scaling_stat_id
+            LEFT JOIN effect_active_modifiers eam
+                                    ON eam.effect_id   = e.id
+                                   AND eam.character_id = %s
             WHERE cs.character_id = %s
               AND cs.is_active    = TRUE
             ORDER BY st.category ASC, st.name ASC
         """
         with self.get_db() as (conn, cursor):
-            cursor.execute(sql, (character_id,))
-            return cursor.fetchall()
+            cursor.execute(sql, (character_id, character_id))
+            raw = cursor.fetchall()
+
+        # Exclude uninvested pool-linked effects
+        return [
+            dict(row) for row in raw
+            if not (
+                row["pool_allocation_id"] is not None
+                and (row["resolved_modifier"] or 0) == 0
+            )
+        ]
 
     # ------------------------------------------------------------------
     # UPDATE
@@ -256,16 +357,28 @@ class EffectModel(BaseModel):
         bonus_type_id: int = None,
         modifier: int = None,
         condition_note: str = None,
+        base_value: int = None,
+        scaling_stat_id: int = None,
+        multiplier: float = None,
+        divisor: int = None,
     ) -> None:
         fields, values = [], []
         if stat_id is not None:
-            fields.append("stat_id = %s"); values.append(stat_id)
+            fields.append("stat_id = %s");         values.append(stat_id)
         if bonus_type_id is not None:
-            fields.append("bonus_type_id = %s"); values.append(bonus_type_id)
+            fields.append("bonus_type_id = %s");   values.append(bonus_type_id)
         if modifier is not None:
-            fields.append("modifier = %s"); values.append(modifier)
+            fields.append("modifier = %s");         values.append(modifier)
         if condition_note is not None:
-            fields.append("condition_note = %s"); values.append(condition_note)
+            fields.append("condition_note = %s");   values.append(condition_note)
+        if base_value is not None:
+            fields.append("base_value = %s");       values.append(base_value)
+        if scaling_stat_id is not None:
+            fields.append("scaling_stat_id = %s");  values.append(scaling_stat_id)
+        if multiplier is not None:
+            fields.append("multiplier = %s");       values.append(multiplier)
+        if divisor is not None:
+            fields.append("divisor = %s");          values.append(divisor)
 
         if not fields:
             return
@@ -274,6 +387,47 @@ class EffectModel(BaseModel):
         sql = f"UPDATE effects SET {', '.join(fields)} WHERE id = %s"
         with self.get_db() as (conn, cursor):
             cursor.execute(sql, tuple(values))
+
+    def set_formula_scaling(
+        self,
+        effect_id: int,
+        scaling_stat_id: int,
+        base_value: int = 0,
+        multiplier: float = 1.0,
+        divisor: int = 1,
+    ) -> None:
+        """
+        Marks an effect as formula-scaled and sets its scaling parameters.
+        Clears modifier and pool_allocation_id — the three effect types
+        are mutually exclusive.
+        """
+        sql = """
+            UPDATE effects
+            SET modifier           = NULL,
+                pool_allocation_id = NULL,
+                scaling_stat_id    = %s,
+                base_value         = %s,
+                multiplier         = %s,
+                divisor            = %s
+            WHERE id = %s
+        """
+        with self.get_db() as (conn, cursor):
+            cursor.execute(sql, (scaling_stat_id, base_value, multiplier, divisor, effect_id))
+
+    def set_pool_allocation(self, effect_id: int, pool_allocation_id: int) -> None:
+        """
+        Links an effect to a pool allocation, marking it as investment-scaled.
+        Sets modifier to NULL at the same time — an effect cannot have both
+        a fixed modifier and an allocation link simultaneously.
+        """
+        sql = """
+            UPDATE effects
+            SET pool_allocation_id = %s,
+                modifier           = NULL
+            WHERE id = %s
+        """
+        with self.get_db() as (conn, cursor):
+            cursor.execute(sql, (pool_allocation_id, effect_id))
 
     # ------------------------------------------------------------------
     # DELETE

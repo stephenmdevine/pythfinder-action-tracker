@@ -7,6 +7,7 @@ from PyQt6.QtGui import QFont
 
 from app.views.theme import palette, fonts
 from app.views.panels.campaign_panel import CampaignPanel
+from app.views.panels.source_library_panel import SourceLibraryPanel
 from app.views.panels.placeholder_panel import PlaceholderPanel
 from config.settings import APP_NAME, APP_VERSION
 
@@ -117,13 +118,11 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.stack.setObjectName("content_panel")
 
-        # Index 0 — Campaign Manager (real panel)
+        # Index 0 — Campaign Manager
         self.stack.addWidget(CampaignPanel(self))
 
-        # Indices 1–4 — Placeholders until screens are built
-        self.stack.addWidget(PlaceholderPanel("Source Library",
-            "Build and manage your feats, spells, conditions,\n"
-            "class features, and other sources here."))
+        # Index 1 — Source Library
+        self.stack.addWidget(SourceLibraryPanel(self))
         self.stack.addWidget(PlaceholderPanel("Character Sheet",
             "View resolved stats, active modifiers,\n"
             "point pools, and level history here."))

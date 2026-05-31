@@ -90,6 +90,47 @@ class CampaignController(BaseController):
         except Exception as e:
             return self._err(f"Failed to create character: {e}")
 
+    def initialize_character_stats(
+        self, character_id: int, stat_values: dict
+    ) -> dict:
+        """
+        Sets initial stat values for a newly created character.
+        stat_values: {stat_id: value, ...}
+        Called immediately after create_character, from the
+        CharacterInitDialog in the view layer.
+        """
+        from app.models.stat_model import StatModel
+        stats = StatModel()
+        errors = []
+        for stat_id, value in stat_values.items():
+            try:
+                stats.set_base_value(character_id, stat_id, value)
+            except Exception as e:
+                errors.append(f"Stat {stat_id}: {e}")
+        if errors:
+            return self._err(f"Some stats failed: {'; '.join(errors)}")
+        return self._ok(message="Character stats initialized.")
+
+    def get_core_stats(self) -> dict:
+        """
+        Returns the subset of stats shown in the initialization modal:
+        ability scores, their modifiers, core combat stats, and saves.
+        Used to populate the CharacterInitDialog.
+        """
+        from app.models.stat_model import StatModel
+        stats = StatModel()
+        try:
+            ability  = stats.get_all(category="ability")
+            combat   = stats.get_all(category="combat")
+            saves    = stats.get_all(category="save")
+            return self._ok({
+                "ability": ability,
+                "combat":  combat,
+                "saves":   saves,
+            })
+        except Exception as e:
+            return self._err(f"Failed to load stats: {e}")
+
     def get_character(self, character_id: int) -> dict:
         try:
             character = self.characters.get_by_id(character_id)

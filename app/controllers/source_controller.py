@@ -113,32 +113,53 @@ class SourceController(BaseController):
         modifier: int = None,
         condition_note: str = "",
         pool_allocation_id: int = None,
+        scaling_stat_id: int = None,
+        base_value: int = None,
+        multiplier: float = 1.0,
+        divisor: int = 1,
     ) -> dict:
         """
-        Adds an effect to a source.
-        Either modifier (fixed) or pool_allocation_id (investment-scaled) must
-        be provided — not both.
+        Adds an effect to a source. Exactly one effect type must be specified:
+          Fixed:             pass modifier (int)
+          Formula-scaled:    pass scaling_stat_id; optionally base_value,
+                             multiplier, divisor
+          Investment-scaled: pass pool_allocation_id
         """
-        if modifier is None and pool_allocation_id is None:
+        # Validate: exactly one effect type
+        type_count = sum([
+            modifier is not None,
+            scaling_stat_id is not None,
+            pool_allocation_id is not None,
+        ])
+        if type_count == 0:
             return self._err(
-                "An effect must have either a fixed modifier or a pool allocation link."
+                "An effect must have a fixed modifier, a scaling stat, "
+                "or a pool allocation link."
             )
-        if modifier is not None and pool_allocation_id is not None:
+        if type_count > 1:
             return self._err(
-                "An effect cannot have both a fixed modifier and a pool allocation link. "
-                "Choose one."
+                "An effect can only have one type: fixed, formula-scaled, "
+                "or investment-scaled."
             )
         try:
             effect_id = self.effects.create(
-                source_id=source_id,
-                stat_id=stat_id,
-                bonus_type_id=bonus_type_id,
-                modifier=modifier,
-                condition_note=condition_note.strip(),
+                source_id       = source_id,
+                stat_id         = stat_id,
+                bonus_type_id   = bonus_type_id,
+                modifier        = modifier,
+                condition_note  = condition_note.strip(),
+                base_value      = base_value,
+                scaling_stat_id = scaling_stat_id,
+                multiplier      = multiplier,
+                divisor         = divisor,
             )
-            # If pool-linked, update the pool_allocation_id on the row directly
             if pool_allocation_id is not None:
                 self.effects.set_pool_allocation(effect_id, pool_allocation_id)
+            elif scaling_stat_id is not None:
+                self.effects.set_formula_scaling(
+                    effect_id, scaling_stat_id,
+                    base_value or 0, multiplier, divisor
+                )
 
             effect = self.effects.get_by_id(effect_id)
             return self._ok(effect, "Effect added.")

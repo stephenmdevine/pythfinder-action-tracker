@@ -315,11 +315,22 @@ class CampaignPanel(QWidget):
         result = self.controller.create_character(
             self.selected_campaign_id, name.strip(), is_pc=True
         )
-        if result["success"]:
-            self._load_characters(self.selected_campaign_id)
-            self._select_by_id(self.character_list, result["data"]["id"])
-        else:
+        if not result["success"]:
             self._show_error(result["message"])
+            return
+
+        character = result["data"]
+        self._load_characters(self.selected_campaign_id)
+        self._select_by_id(self.character_list, character["id"])
+
+        # Open stat initialization dialog immediately after creation
+        from app.views.dialogs.character_init_dialog import CharacterInitDialog
+        init_dlg = CharacterInitDialog(
+            character_id   = character["id"],
+            character_name = character["name"],
+            parent         = self,
+        )
+        init_dlg.exec()  # result ignored — Skip is always available
 
     def _on_rename_character(self):
         item = self.character_list.currentItem()
