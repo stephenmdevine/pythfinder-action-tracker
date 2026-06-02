@@ -36,20 +36,11 @@ class SourceModel(BaseModel):
         duration_value: int = None,
         action_type_id: int = None,
         description: str = "",
+        campaign_id: int = None,
     ) -> int:
         """
         Creates a new source. Returns its new id.
-
-        duration_type must be one of:
-            'permanent', 'toggle', 'rounds', 'until_next_turn', 'encounter', 'timed'
-
-        duration_value:
-            - 'rounds' / 'timed': the number of rounds or minutes
-            - all others: leave None
-
-        action_type_id:
-            - None for passive sources (Weapon Focus, ability score bonuses)
-            - Set to the action required to activate (Power Attack = Free, Haste = not activated by character)
+        campaign_id=None means global (visible in all campaigns).
         """
         valid_duration_types = {
             "permanent", "toggle", "rounds", "until_next_turn", "encounter", "timed"
@@ -62,15 +53,49 @@ class SourceModel(BaseModel):
 
         sql = """
             INSERT INTO sources
-                (name, source_category_id, duration_type, duration_value, action_type_id, description)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                (campaign_id, name, source_category_id, duration_type,
+                 duration_value, action_type_id, description)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
         """
         with self.get_db() as (conn, cursor):
             cursor.execute(sql, (
-                name, source_category_id, duration_type,
+                campaign_id, name, source_category_id, duration_type,
                 duration_value, action_type_id, description
             ))
             return cursor.lastrowid
+
+    def get_or_create_by_name(
+        self,
+        name: str,
+        source_category_id: int,
+        campaign_id: int = None,
+    ) -> tuple[int, bool]:
+        """
+        Returns (source_id, created) where created=True if a new row was inserted.
+        Matches on name + category regardless of campaign scope — a global source
+        with the same name prevents a duplicate being created.
+        Used by the level-up modal to create stub sources for feats/class features.
+        """
+        sql = """
+            SELECT id FROM sources
+            WHERE name = %s AND source_category_id = %s
+            LIMIT 1
+        """
+        with self.get_db() as (conn, cursor):
+            cursor.execute(sql, (name, source_category_id))
+            row = cursor.fetchone()
+
+        if row:
+            return row["id"], False
+
+        source_id = self.create(
+            name               = name,
+            source_category_id = source_category_id,
+            duration_type      = "permanent",
+            campaign_id        = campaign_id,
+            description        = "Created automatically at level-up. Edit in Source Library.",
+        )
+        return source_id, True
 
     # ------------------------------------------------------------------
     # SOURCES — READ
@@ -93,20 +118,52 @@ class SourceModel(BaseModel):
         Returns all sources, optionally filtered by category.
         Joined with category name and action type name for display.
         """
+    def get_all(self, source_category_id: int = None, campaign_id: int = None) -> list[dict]:
+        """
+        Returns sources visible in a given context:
+          - Always includes global sources (campaign_id IS NULL)
+          - If campaign_id provided, also includes that campaign's sources
+          - Optionally filtered by source_category_id
+        """
+        sql = """
+            SELECT s.*, sc.name AS category_name, at.name AS action_type_name
+            FROM sources s
+            JOIN source_categories sc ON s.source_category_id = sc.id
+            LEFT JOIN action_types at ON s.action_type_id = at.id
+            WHERE (s.campaign_id IS NULL
+        """
+        params = []
+        if campaign_id is not None:
+            sql += " OR s.campaign_id = %s"
+            params.append(campaign_id)
+        sql += ")"
+
+        if source_category_id is not None:
+            sql += " AND s.source_category_id = %s"
+            params.append(source_category_id)
+
+        sql += " ORDER BY sc.name ASC, s.name ASC"
+
+        with self.get_db() as (conn, cursor):
+            cursor.execute(sql, tuple(params))
+            return cursor.fetchall()
+
+    def get_all_no_filter(self, source_category_id: int = None) -> list[dict]:
+        """Returns every source with no campaign restriction — used by the 'All' scope view."""
         sql = """
             SELECT s.*, sc.name AS category_name, at.name AS action_type_name
             FROM sources s
             JOIN source_categories sc ON s.source_category_id = sc.id
             LEFT JOIN action_types at ON s.action_type_id = at.id
         """
-        params = ()
+        params = []
         if source_category_id is not None:
             sql += " WHERE s.source_category_id = %s"
-            params = (source_category_id,)
+            params.append(source_category_id)
         sql += " ORDER BY sc.name ASC, s.name ASC"
 
         with self.get_db() as (conn, cursor):
-            cursor.execute(sql, params)
+            cursor.execute(sql, tuple(params))
             return cursor.fetchall()
 
     def search_by_name(self, query: str) -> list[dict]:

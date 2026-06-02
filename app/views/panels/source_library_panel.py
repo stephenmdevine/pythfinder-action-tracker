@@ -36,6 +36,7 @@ class SourceLibraryPanel(QWidget):
         super().__init__(parent)
         self.controller = SourceController()
         self.selected_source_id: int | None = None
+        self.active_campaign_id: int | None = None   # set by MainWindow when campaign changes
         self._edit_mode = False
 
         # Debounce timer for search field
@@ -73,6 +74,11 @@ class SourceLibraryPanel(QWidget):
 
     # ---- Filter column ------------------------------------------
 
+    def set_campaign(self, campaign_id: int | None):
+        """Called by MainWindow when the active campaign changes."""
+        self.active_campaign_id = campaign_id
+        self._load_sources()
+
     def _build_filter_column(self) -> QWidget:
         col = QFrame()
         col.setObjectName("card")
@@ -88,6 +94,18 @@ class SourceLibraryPanel(QWidget):
         div.setFrameShape(QFrame.Shape.HLine)
         div.setStyleSheet(f"color: {palette['border']};")
         layout.addWidget(div)
+
+        # Campaign scope filter
+        scope_label = QLabel("Campaign scope")
+        scope_label.setObjectName("label_muted")
+        layout.addWidget(scope_label)
+
+        self.scope_filter = QComboBox()
+        self.scope_filter.addItem("Global + current campaign", "current")
+        self.scope_filter.addItem("Global only", "global")
+        self.scope_filter.addItem("All campaigns", "all")
+        self.scope_filter.currentIndexChanged.connect(self._load_sources)
+        layout.addWidget(self.scope_filter)
 
         # Category filter
         cat_label = QLabel("Category")
@@ -112,7 +130,6 @@ class SourceLibraryPanel(QWidget):
 
         layout.addStretch()
 
-        # Clear filters
         btn_clear = QPushButton("Clear Filters")
         btn_clear.clicked.connect(self._clear_filters)
         layout.addWidget(btn_clear)
@@ -225,17 +242,40 @@ class SourceLibraryPanel(QWidget):
         query    = self.search_bar.text().strip() if hasattr(self, "search_bar") else ""
         cat_id   = self.category_filter.currentData() if hasattr(self, "category_filter") else None
         dur_type = self.duration_filter.currentData() if hasattr(self, "duration_filter") else None
+        scope    = self.scope_filter.currentData() if hasattr(self, "scope_filter") else "current"
+
+        # Determine campaign_id to pass based on scope
+        if scope == "global":
+            campaign_id = None          # get_all will only return NULL campaign_id rows
+        elif scope == "all":
+            campaign_id = "__all__"     # special sentinel handled below
+        else:
+            campaign_id = self.active_campaign_id  # current + global
 
         if query:
             result = self.controller.search_sources(query)
+        elif scope == "all":
+            # No campaign filter at all
+            result = self.controller.list_sources(cat_id, campaign_id=None)
+            # Then manually include all — pass a flag via None with no restriction
+            # Actually we need a different model call here; fall back to list_sources
+            # with no campaign filter by temporarily bypassing the WHERE clause.
+            # Simplest: call list_sources with campaign_id=None which returns all
+            # global; for "all" scope we want truly everything.
+            result = self._list_all_sources(cat_id)
         else:
-            result = self.controller.list_sources(cat_id)
+            result = self.controller.list_sources(cat_id, campaign_id)
 
         self.source_list.clear()
         if not result["success"]:
             return
 
         sources = result["data"]
+
+        # Apply scope=global post-filter (model returns global+campaign, so filter here)
+        if scope == "global":
+            sources = [s for s in sources if s.get("campaign_id") is None]
+
         if dur_type:
             sources = [s for s in sources if s["duration_type"] == dur_type]
 
@@ -244,6 +284,10 @@ class SourceLibraryPanel(QWidget):
             item  = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, source["id"])
             self.source_list.addItem(item)
+
+    def _list_all_sources(self, cat_id: int = None) -> dict:
+        """Returns all sources regardless of campaign scope, for the 'All' filter."""
+        return self.controller.list_all_sources(source_category_id=cat_id)
 
     def _load_source_detail(self, source_id: int):
         result = self.controller.get_source(source_id)

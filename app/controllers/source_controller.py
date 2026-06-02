@@ -36,17 +36,19 @@ class SourceController(BaseController):
         duration_value: int = None,
         action_type_id: int = None,
         description: str = "",
+        campaign_id: int = None,
     ) -> dict:
         if not name.strip():
             return self._err("Source name cannot be empty.")
         try:
             source_id = self.sources.create(
-                name=name.strip(),
-                source_category_id=source_category_id,
-                duration_type=duration_type,
-                duration_value=duration_value,
-                action_type_id=action_type_id,
-                description=description.strip(),
+                name               = name.strip(),
+                source_category_id = source_category_id,
+                duration_type      = duration_type,
+                duration_value     = duration_value,
+                action_type_id     = action_type_id,
+                description        = description.strip(),
+                campaign_id        = campaign_id,
             )
             source = self.sources.get_by_id(source_id)
             return self._ok(source, f"Source '{name}' created.")
@@ -60,16 +62,28 @@ class SourceController(BaseController):
             source = self.sources.get_by_id(source_id)
             if not source:
                 return self._err(f"Source {source_id} not found.")
-            # Include effects in the detail view
             source["effects"] = self.effects.get_by_source(source_id)
             return self._ok(source)
         except Exception as e:
             return self._err(f"Failed to load source: {e}")
 
-    def list_sources(self, source_category_id: int = None) -> dict:
+    def list_sources(self, source_category_id: int = None, campaign_id: int = None) -> dict:
         try:
-            sources = self.sources.get_all(source_category_id)
+            # campaign_id=None with no restriction means truly global only in get_all().
+            # For the "all scope" view the panel calls get_all_no_filter via this method
+            # when it passes campaign_id=None explicitly after scope handling.
+            sources = self.sources.get_all(source_category_id, campaign_id)
             return self._ok(sources)
+        except Exception as e:
+            return self._err(f"Failed to list sources: {e}")
+
+    def list_all_sources(self, source_category_id: int = None) -> dict:
+        """Returns every source regardless of campaign — used by the 'All' scope filter."""
+        try:
+            sources = self.sources.get_all_no_filter(source_category_id)
+            return self._ok(sources)
+        except Exception as e:
+            return self._err(f"Failed to list all sources: {e}")
         except Exception as e:
             return self._err(f"Failed to list sources: {e}")
 
@@ -213,6 +227,29 @@ class SourceController(BaseController):
     # ------------------------------------------------------------------
     # ASSIGNING SOURCES TO CHARACTERS
     # ------------------------------------------------------------------
+
+    def get_or_create_source(
+        self,
+        name: str,
+        source_category_id: int,
+        campaign_id: int = None,
+    ) -> dict:
+        """
+        Returns an existing source matching name+category, or creates a
+        minimal stub if none exists. Used by the level-up modal.
+        Returns: {"source_id": int, "created": bool, "name": str}
+        """
+        try:
+            source_id, created = self.sources.get_or_create_by_name(
+                name, source_category_id, campaign_id
+            )
+            return self._ok({
+                "source_id": source_id,
+                "created":   created,
+                "name":      name,
+            })
+        except Exception as e:
+            return self._err(f"Failed to get or create source '{name}': {e}")
 
     def assign_source_to_character(
         self, character_id: int, source_id: int

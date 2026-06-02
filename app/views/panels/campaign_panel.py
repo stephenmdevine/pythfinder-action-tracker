@@ -360,24 +360,21 @@ class CampaignPanel(QWidget):
 
         char_id   = item.data(Qt.ItemDataRole.UserRole)
         char_data = item.data(Qt.ItemDataRole.UserRole + 1)
+        current_level = self.controller.get_level_history(char_id)
+        levels = current_level["data"] if current_level["success"] else []
+        cur_lvl = max((l["level"] for l in levels), default=0)
 
-        class_name, ok = QInputDialog.getText(
-            self, f"Level Up — {char_data['name']}",
-            "Class name for this level:",
-            QLineEdit.EchoMode.Normal
+        from app.views.dialogs.level_up_dialog import LevelUpDialog
+        dlg = LevelUpDialog(
+            character_id   = char_id,
+            character_name = char_data["name"],
+            current_level  = cur_lvl,
+            campaign_id    = self.selected_campaign_id,
+            parent         = self,
         )
-        if not ok or not class_name.strip():
-            return
-
-        result = self.controller.level_up(char_id, class_name.strip())
-        if result["success"]:
-            # Reload to refresh level display
+        if dlg.exec():
             self._load_characters(self.selected_campaign_id)
             self._select_by_id(self.character_list, char_id)
-
-            QMessageBox.information(self, "Level Up", result["message"])
-        else:
-            self._show_error(result["message"])
 
     def _on_delete_character(self):
         item = self.character_list.currentItem()

@@ -175,15 +175,28 @@ class CampaignController(BaseController):
         self,
         character_id: int,
         class_name: str,
+        hp_gained: int = 0,
+        skill_points: int = 0,
+        ability_score_increase: str = "",
+        feats: list[str] = None,
+        class_features: list[str] = None,
         notes: str = "",
+        campaign_id: int = None,
     ) -> dict:
         """
-        Records a level-up event for a character.
-        The new level is automatically the character's current highest level + 1.
-        The caller (View) is responsible for then opening the source-assignment
-        form so the user can add feats, class features, and spells gained.
-        That assignment is handled by SourceController.assign_source_to_character().
+        Records a full level-up event for a character.
+
+        - Increments level and records the class_name
+        - Creates stub sources for any feats/class features that don't exist yet
+        - Assigns all new sources to the character
+        - Returns a summary of what was created vs found
+
+        hp_gained, skill_points, ability_score_increase are stored in notes
+        for reference — the user applies these manually to their stat block.
         """
+        from app.controllers.source_controller import SourceController
+        from app.models.stat_model import StatModel
+
         character = self.characters.get_by_id(character_id)
         if not character:
             return self._err(f"Character {character_id} not found.")
@@ -193,18 +206,100 @@ class CampaignController(BaseController):
         try:
             current_level = self.characters.get_current_level(character_id)
             new_level     = current_level + 1
-            level_id      = self.characters.add_level(
-                character_id, new_level, class_name.strip(), notes.strip()
+
+            # Build a summary note
+            note_parts = []
+            if hp_gained:
+                note_parts.append(f"HP gained: {hp_gained}")
+            if skill_points:
+                note_parts.append(f"Skill points: {skill_points}")
+            if ability_score_increase:
+                note_parts.append(f"Ability score increase: {ability_score_increase}")
+            if notes:
+                note_parts.append(notes)
+            full_notes = " | ".join(note_parts)
+
+            self.characters.add_level(
+                character_id, new_level, class_name.strip(), full_notes
             )
+
+            # Process feats and class features
+            sc = SourceController()
+            assigned   = []
+            created    = []
+            skipped    = []
+
+            feat_cat_id    = self._get_category_id("Feat")
+            feature_cat_id = self._get_category_id("Class Feature")
+
+            for feat_name in (feats or []):
+                feat_name = feat_name.strip()
+                if not feat_name:
+                    continue
+                result = sc.get_or_create_source(feat_name, feat_cat_id, campaign_id)
+                if not result["success"]:
+                    skipped.append(feat_name)
+                    continue
+                source_id = result["data"]["source_id"]
+                if result["data"]["created"]:
+                    created.append(feat_name)
+                # Assign to character (skip if already assigned)
+                existing = self.characters_sources_model().get_character_sources(character_id)
+                already  = any(s["source_id"] == source_id for s in existing)
+                if not already:
+                    sc.assign_source_to_character(character_id, source_id)
+                    assigned.append(feat_name)
+
+            for feature_name in (class_features or []):
+                feature_name = feature_name.strip()
+                if not feature_name:
+                    continue
+                result = sc.get_or_create_source(feature_name, feature_cat_id, campaign_id)
+                if not result["success"]:
+                    skipped.append(feature_name)
+                    continue
+                source_id = result["data"]["source_id"]
+                if result["data"]["created"]:
+                    created.append(feature_name)
+                existing = self.characters_sources_model().get_character_sources(character_id)
+                already  = any(s["source_id"] == source_id for s in existing)
+                if not already:
+                    sc.assign_source_to_character(character_id, source_id)
+                    assigned.append(feature_name)
+
+            summary = (
+                f"{character['name']} is now level {new_level} ({class_name})."
+            )
+            if created:
+                summary += f" New sources created: {', '.join(created)}."
+            if skipped:
+                summary += f" Could not process: {', '.join(skipped)}."
+
             return self._ok(
-                data={"level_id": level_id, "new_level": new_level},
-                message=(
-                    f"{character['name']} is now level {new_level} "
-                    f"({class_name}). Add new feats and class features."
-                ),
+                data={
+                    "new_level": new_level,
+                    "created":   created,
+                    "assigned":  assigned,
+                    "skipped":   skipped,
+                },
+                message=summary,
             )
         except Exception as e:
             return self._err(f"Failed to record level-up: {e}")
+
+    def _get_category_id(self, name: str) -> int | None:
+        """Helper: looks up a source_category id by name."""
+        from app.models.source_model import SourceModel
+        cats = SourceModel().get_all_categories()
+        for c in cats:
+            if c["name"] == name:
+                return c["id"]
+        return None
+
+    def characters_sources_model(self):
+        """Lazy accessor to avoid circular import at module level."""
+        from app.models.source_model import SourceModel
+        return SourceModel()
 
     def get_level_history(self, character_id: int) -> dict:
         try:
