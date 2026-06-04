@@ -6,7 +6,6 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt
 
 from app.views.theme import palette
-from app.views.widgets.searchable_combo import SearchableComboBox
 from app.controllers.source_controller import SourceController
 from app.views.panels.source_library_panel import DURATION_LABELS
 
@@ -38,7 +37,7 @@ class SourceDialog(QDialog):
         self.name_edit.setPlaceholderText("e.g. Power Attack")
         form.addRow("Name:", self.name_edit)
 
-        self.category_combo = SearchableComboBox()
+        self.category_combo = QComboBox()
         form.addRow("Category:", self.category_combo)
 
         self.duration_combo = QComboBox()
@@ -51,7 +50,7 @@ class SourceDialog(QDialog):
         self.duration_value_spin.setValue(0)
         form.addRow("Duration value:", self.duration_value_spin)
 
-        self.action_combo = SearchableComboBox()
+        self.action_combo = QComboBox()
         form.addRow("Action cost:", self.action_combo)
 
         layout.addLayout(form)
@@ -82,9 +81,9 @@ class SourceDialog(QDialog):
     def _load_reference_data(self):
         cats = self.controller.list_categories()
         if cats["success"]:
-            self.category_combo.populate(cats["data"])
+            for cat in cats["data"]:
+                self.category_combo.addItem(cat["name"], cat["id"])
 
-        # Load action types
         from config.database import get_connection, close_connection
         try:
             conn   = get_connection()
@@ -92,8 +91,9 @@ class SourceDialog(QDialog):
             cursor.execute("SELECT id, name FROM action_types ORDER BY name ASC")
             rows = cursor.fetchall()
             close_connection(conn, cursor)
-            action_types = [{"id": None, "name": "Passive (no action)"}] + rows
-            self.action_combo.populate(action_types)
+            self.action_combo.addItem("Passive (no action)", None)
+            for row in rows:
+                self.action_combo.addItem(row["name"], row["id"])
         except Exception:
             pass
 
@@ -105,9 +105,9 @@ class SourceDialog(QDialog):
 
         dur_type  = self.duration_combo.currentData()
         dur_value = self.duration_value_spin.value() or None
-        action_id = self.action_combo.current_id()
+        action_id = self.action_combo.currentData()
         desc      = self.description_edit.toPlainText().strip()
-        cat_id    = self.category_combo.current_id()
+        cat_id    = self.category_combo.currentData()
 
         if cat_id is None:
             QMessageBox.warning(self, "Validation", "Please select a category.")

@@ -8,7 +8,6 @@ from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont
 
 from app.views.theme import palette
-from app.views.widgets.searchable_combo import SearchableComboBox
 from app.views.dialogs.effect_dialog import EffectDialog
 from app.controllers.source_controller import SourceController
 
@@ -465,11 +464,16 @@ class SourceLibraryPanel(QWidget):
         self._edit_name = QLineEdit(source["name"])
         form.addRow("Name:", self._edit_name)
 
-        self._edit_category = SearchableComboBox()
+        self._edit_category = QComboBox()
         cats = self.controller.list_categories()
         if cats["success"]:
-            self._edit_category.populate(cats["data"])
-            self._edit_category.select_by_id(source["source_category_id"])
+            for cat in cats["data"]:
+                self._edit_category.addItem(cat["name"], cat["id"])
+            # Pre-select the current category
+            for i in range(self._edit_category.count()):
+                if self._edit_category.itemData(i) == source["source_category_id"]:
+                    self._edit_category.setCurrentIndex(i)
+                    break
         form.addRow("Category:", self._edit_category)
 
         self._edit_duration = QComboBox()
@@ -484,13 +488,17 @@ class SourceLibraryPanel(QWidget):
         self._edit_duration_value.setValue(source.get("duration_value") or 0)
         form.addRow("Duration value:", self._edit_duration_value)
 
-        # Action type combo
-        self._edit_action = SearchableComboBox()
+        self._edit_action = QComboBox()
         action_types_result = self._get_action_types()
         if action_types_result:
-            self._edit_action.populate(action_types_result)
+            for at in action_types_result:
+                self._edit_action.addItem(at["name"], at["id"])
+            # Pre-select the current action type
             if source.get("action_type_id"):
-                self._edit_action.select_by_id(source["action_type_id"])
+                for i in range(self._edit_action.count()):
+                    if self._edit_action.itemData(i) == source["action_type_id"]:
+                        self._edit_action.setCurrentIndex(i)
+                        break
         form.addRow("Action cost:", self._edit_action)
 
         self.detail_layout.addLayout(form)
@@ -594,12 +602,12 @@ class SourceLibraryPanel(QWidget):
             return
 
         dur_value = self._edit_duration_value.value() or None
-        action_id = self._edit_action.current_id()
+        action_id = self._edit_action.currentData()
 
         result = self.controller.update_source(
             self.selected_source_id,
             name               = name,
-            source_category_id = self._edit_category.current_id(),
+            source_category_id = self._edit_category.currentData(),
             duration_type      = self._edit_duration.currentData(),
             duration_value     = dur_value,
             action_type_id     = action_id,
