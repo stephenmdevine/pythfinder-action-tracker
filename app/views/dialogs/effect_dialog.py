@@ -2,14 +2,21 @@ from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
     QLabel, QPushButton, QLineEdit, QTextEdit,
     QRadioButton, QButtonGroup, QDoubleSpinBox,
-    QSpinBox, QFrame, QMessageBox, QWidget
+    QSpinBox, QFrame, QMessageBox, QWidget, QComboBox
 )
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 
 from app.views.theme import palette
-from app.views.widgets.searchable_combo import SearchableComboBox
 from app.controllers.source_controller import SourceController
+
+
+def _select_combo_by_id(combo: QComboBox, target_id) -> None:
+    """Set a QComboBox to the item whose itemData matches target_id."""
+    for i in range(combo.count()):
+        if combo.itemData(i) == target_id:
+            combo.setCurrentIndex(i)
+            return
 
 
 class EffectDialog(QDialog):
@@ -51,14 +58,14 @@ class EffectDialog(QDialog):
         layout.setSpacing(14)
         layout.setContentsMargins(20, 20, 20, 20)
 
-        # ---- Stat selector ----
+        # ---- Stat / bonus type selectors ----
         stat_row = QFormLayout()
         stat_row.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        self.stat_combo = SearchableComboBox()
+        self.stat_combo = QComboBox()
         stat_row.addRow("Stat affected:", self.stat_combo)
 
-        self.bonus_type_combo = SearchableComboBox()
+        self.bonus_type_combo = QComboBox()
         stat_row.addRow("Bonus type:", self.bonus_type_combo)
         layout.addLayout(stat_row)
 
@@ -67,15 +74,27 @@ class EffectDialog(QDialog):
         type_label.setObjectName("subsection_title")
         layout.addWidget(type_label)
 
-        self.type_group   = QButtonGroup(self)
-        self.radio_fixed  = QRadioButton("Fixed modifier")
+        self.type_group    = QButtonGroup(self)
+        self.radio_fixed   = QRadioButton("Fixed modifier")
         self.radio_formula = QRadioButton("Formula-scaled  (base + floor(stat × multiplier ÷ divisor))")
-        self.radio_pool   = QRadioButton("Investment-scaled  (pool-linked, user enters bonus)")
+        self.radio_pool    = QRadioButton("Investment-scaled  (pool-linked, user enters bonus)")
 
         self.radio_fixed.setChecked(True)
+
+        # Wrap each radio in a styled frame so the selected one is highlighted
+        self._radio_frames = {}
         for rb in (self.radio_fixed, self.radio_formula, self.radio_pool):
             self.type_group.addButton(rb)
-            layout.addWidget(rb)
+            frame = QFrame()
+            frame.setObjectName("radio_option_frame")
+            frame_layout = QHBoxLayout(frame)
+            frame_layout.setContentsMargins(10, 6, 10, 6)
+            frame_layout.addWidget(rb)
+            frame_layout.addStretch()
+            self._radio_frames[rb] = frame
+            layout.addWidget(frame)
+
+        self._refresh_radio_highlight()
 
         # ---- Fixed modifier panel ----
         self.fixed_panel = QFrame()
@@ -92,7 +111,7 @@ class EffectDialog(QDialog):
         formula_form = QFormLayout(self.formula_panel)
         formula_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        self.scaling_stat_combo = SearchableComboBox()
+        self.scaling_stat_combo = QComboBox()
         formula_form.addRow("Scaling stat:", self.scaling_stat_combo)
 
         self.base_value_spin = QSpinBox()
@@ -174,29 +193,48 @@ class EffectDialog(QDialog):
         self.multiplier_spin.valueChanged.connect(self._update_formula_preview)
         self.divisor_spin.valueChanged.connect(self._update_formula_preview)
 
+    def _refresh_radio_highlight(self):
+        """Update frame backgrounds to highlight the selected radio option."""
+        selected_style = (
+            f"QFrame#radio_option_frame {{ "
+            f"background-color: {palette['teal']}22; "
+            f"border: 1px solid {palette['teal']}; "
+            f"border-radius: 4px; }}"
+        )
+        default_style = (
+            f"QFrame#radio_option_frame {{ "
+            f"background-color: transparent; "
+            f"border: 1px solid {palette['border']}; "
+            f"border-radius: 4px; }}"
+        )
+        for rb, frame in self._radio_frames.items():
+            frame.setStyleSheet(selected_style if rb.isChecked() else default_style)
+
     # ------------------------------------------------------------------
     # DATA
     # ------------------------------------------------------------------
 
     def _load_reference_data(self):
-        stats_result      = self.controller.list_stats()
-        bonus_result      = self.controller.list_bonus_types()
+        stats_result = self.controller.list_stats()
+        bonus_result = self.controller.list_bonus_types()
 
         if stats_result["success"]:
-            self.stat_combo.populate(stats_result["data"])
-            self.scaling_stat_combo.populate(stats_result["data"])
+            for stat in stats_result["data"]:
+                self.stat_combo.addItem(stat["name"], stat["id"])
+                self.scaling_stat_combo.addItem(stat["name"], stat["id"])
         if bonus_result["success"]:
-            self.bonus_type_combo.populate(bonus_result["data"])
+            for bt in bonus_result["data"]:
+                self.bonus_type_combo.addItem(bt["name"], bt["id"])
 
     def _populate_from_effect(self, e: dict):
         """Pre-fills all fields when editing an existing effect."""
-        self.stat_combo.select_by_id(e["stat_id"])
-        self.bonus_type_combo.select_by_id(e["bonus_type_id"])
+        _select_combo_by_id(self.stat_combo, e["stat_id"])
+        _select_combo_by_id(self.bonus_type_combo, e["bonus_type_id"])
         self.condition_note.setPlainText(e.get("condition_note") or "")
 
         if e.get("scaling_stat_id") is not None:
             self.radio_formula.setChecked(True)
-            self.scaling_stat_combo.select_by_id(e["scaling_stat_id"])
+            _select_combo_by_id(self.scaling_stat_combo, e["scaling_stat_id"])
             self.base_value_spin.setValue(e.get("base_value") or 0)
             self.multiplier_spin.setValue(float(e.get("multiplier") or 1.0))
             self.divisor_spin.setValue(e.get("divisor") or 1)
@@ -214,15 +252,16 @@ class EffectDialog(QDialog):
         self.fixed_panel.setVisible(self.radio_fixed.isChecked())
         self.formula_panel.setVisible(self.radio_formula.isChecked())
         self.pool_panel.setVisible(self.radio_pool.isChecked())
+        self._refresh_radio_highlight()
         self._update_formula_preview()
 
     def _update_formula_preview(self):
         if not self.radio_formula.isChecked():
             return
-        stat_name   = self.scaling_stat_combo.currentText() or "stat"
-        base        = self.base_value_spin.value()
-        multiplier  = self.multiplier_spin.value()
-        divisor     = self.divisor_spin.value()
+        stat_name  = self.scaling_stat_combo.currentText() or "stat"
+        base       = self.base_value_spin.value()
+        multiplier = self.multiplier_spin.value()
+        divisor    = self.divisor_spin.value()
 
         base_str = f"{base:+d} + " if base != 0 else ""
         mult_str = f"{multiplier:.2f}".rstrip("0").rstrip(".")
@@ -236,8 +275,8 @@ class EffectDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _on_save(self):
-        stat_id       = self.stat_combo.current_id()
-        bonus_type_id = self.bonus_type_combo.current_id()
+        stat_id       = self.stat_combo.currentData()
+        bonus_type_id = self.bonus_type_combo.currentData()
         condition     = self.condition_note.toPlainText().strip()
 
         if stat_id is None:
@@ -259,7 +298,7 @@ class EffectDialog(QDialog):
             kwargs["modifier"] = self.modifier_spin.value()
 
         elif self.radio_formula.isChecked():
-            scaling_stat_id = self.scaling_stat_combo.current_id()
+            scaling_stat_id = self.scaling_stat_combo.currentData()
             if scaling_stat_id is None:
                 QMessageBox.warning(self, "Validation", "Please select a scaling stat.")
                 return
@@ -271,8 +310,6 @@ class EffectDialog(QDialog):
         # pool type: no extra kwargs needed — pool_allocation_id linked later
 
         if self.effect:
-            # effect dict may use 'effect_id' (from most queries) or 'id'
-            # (from get_by_id). Support both defensively.
             effect_id = self.effect.get("effect_id") or self.effect.get("id")
             if effect_id is None:
                 QMessageBox.warning(self, "Error", "Could not determine effect ID.")
