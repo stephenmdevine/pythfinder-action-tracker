@@ -116,7 +116,10 @@ INSERT INTO bonus_types (name, always_stacks) VALUES
 -- Always-stacking types
 ('Dodge',         TRUE),   -- dodge bonuses always stack
 ('Untyped',       TRUE),   -- untyped bonuses always stack
-('Penalty',       TRUE);   -- penalties always stack
+('Penalty',       TRUE),   -- penalties always stack
+
+-- Racial bonuses (highest wins per stat, like other typed bonuses)
+('Racial',        FALSE);
 
 -- ============================================================
 -- ACTION TYPES

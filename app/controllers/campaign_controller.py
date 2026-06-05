@@ -195,7 +195,6 @@ class CampaignController(BaseController):
         for reference — the user applies these manually to their stat block.
         """
         from app.controllers.source_controller import SourceController
-        from app.models.stat_model import StatModel
 
         character = self.characters.get_by_id(character_id)
         if not character:
@@ -223,49 +222,41 @@ class CampaignController(BaseController):
                 character_id, new_level, class_name.strip(), full_notes
             )
 
-            # Process feats and class features
-            sc = SourceController()
-            assigned   = []
-            created    = []
-            skipped    = []
-
+            sc             = SourceController()
+            assigned       = []
+            created        = []
+            skipped        = []
             feat_cat_id    = self._get_category_id("Feat")
             feature_cat_id = self._get_category_id("Class Feature")
 
-            for feat_name in (feats or []):
-                feat_name = feat_name.strip()
-                if not feat_name:
-                    continue
-                result = sc.get_or_create_source(feat_name, feat_cat_id, campaign_id)
+            # Pre-fetch already-assigned source IDs once — avoids a DB call
+            # per loop iteration and sidesteps any column-name ambiguity.
+            existing_result  = sc.list_character_sources(character_id)
+            already_assigned = set()
+            if existing_result["success"]:
+                already_assigned = {s["source_id"] for s in existing_result["data"]}
+
+            def _process(name: str, cat_id: int):
+                name = name.strip()
+                if not name:
+                    return
+                result = sc.get_or_create_source(name, cat_id, campaign_id)
                 if not result["success"]:
-                    skipped.append(feat_name)
-                    continue
-                source_id = result["data"]["source_id"]
+                    skipped.append(name)
+                    return
+                sid = result["data"]["source_id"]
                 if result["data"]["created"]:
-                    created.append(feat_name)
-                # Assign to character (skip if already assigned)
-                existing = self.characters_sources_model().get_character_sources(character_id)
-                already  = any(s["source_id"] == source_id for s in existing)
-                if not already:
-                    sc.assign_source_to_character(character_id, source_id)
-                    assigned.append(feat_name)
+                    created.append(name)
+                if sid not in already_assigned:
+                    sc.assign_source_to_character(character_id, sid)
+                    assigned.append(name)
+                    already_assigned.add(sid)
+
+            for feat_name in (feats or []):
+                _process(feat_name, feat_cat_id)
 
             for feature_name in (class_features or []):
-                feature_name = feature_name.strip()
-                if not feature_name:
-                    continue
-                result = sc.get_or_create_source(feature_name, feature_cat_id, campaign_id)
-                if not result["success"]:
-                    skipped.append(feature_name)
-                    continue
-                source_id = result["data"]["source_id"]
-                if result["data"]["created"]:
-                    created.append(feature_name)
-                existing = self.characters_sources_model().get_character_sources(character_id)
-                already  = any(s["source_id"] == source_id for s in existing)
-                if not already:
-                    sc.assign_source_to_character(character_id, source_id)
-                    assigned.append(feature_name)
+                _process(feature_name, feature_cat_id)
 
             summary = (
                 f"{character['name']} is now level {new_level} ({class_name})."
@@ -295,11 +286,6 @@ class CampaignController(BaseController):
             if c["name"] == name:
                 return c["id"]
         return None
-
-    def characters_sources_model(self):
-        """Lazy accessor to avoid circular import at module level."""
-        from app.models.source_model import SourceModel
-        return SourceModel()
 
     def get_level_history(self, character_id: int) -> dict:
         try:

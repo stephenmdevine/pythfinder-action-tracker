@@ -328,6 +328,7 @@ class CampaignPanel(QWidget):
         init_dlg = CharacterInitDialog(
             character_id   = character["id"],
             character_name = character["name"],
+            campaign_id    = self.selected_campaign_id,
             parent         = self,
         )
         init_dlg.exec()  # result ignored — Skip is always available
