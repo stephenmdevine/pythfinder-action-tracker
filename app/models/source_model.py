@@ -258,7 +258,14 @@ class SourceModel(BaseModel):
                 cs.id AS character_source_id,
                 cs.is_active,
                 cs.rounds_remaining,
-                s.*,
+                s.id AS source_id,
+                s.campaign_id,
+                s.name,
+                s.source_category_id,
+                s.duration_type,
+                s.duration_value,
+                s.action_type_id,
+                s.description,
                 sc.name AS category_name,
                 at.name AS action_type_name
             FROM character_sources cs

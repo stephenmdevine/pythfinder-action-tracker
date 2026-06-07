@@ -8,6 +8,7 @@ from PyQt6.QtGui import QFont
 from app.views.theme import palette, fonts
 from app.views.panels.campaign_panel import CampaignPanel
 from app.views.panels.source_library_panel import SourceLibraryPanel
+from app.views.panels.character_sheet_panel import CharacterSheetPanel
 from app.views.panels.placeholder_panel import PlaceholderPanel
 from config.settings import APP_NAME, APP_VERSION
 
@@ -123,9 +124,11 @@ class MainWindow(QMainWindow):
 
         # Index 1 — Source Library
         self.stack.addWidget(SourceLibraryPanel(self))
-        self.stack.addWidget(PlaceholderPanel("Character Sheet",
-            "View resolved stats, active modifiers,\n"
-            "point pools, and level history here."))
+
+        # Index 2 — Character Sheet
+        self.character_sheet_panel = CharacterSheetPanel(self)
+        self.stack.addWidget(self.character_sheet_panel)
+
         self.stack.addWidget(PlaceholderPanel("Inventory & Wealth",
             "Manage items, encumbrance,\n"
             "and the wealth ledger here."))
