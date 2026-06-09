@@ -55,8 +55,26 @@ _CATEGORY_LABELS = {
     "other":   "Other",
 }
 
-# Ability score abbreviations — shown with score AND modifier
-_ABILITY_ABBREVS = {"STR", "DEX", "CON", "INT", "WIS", "CHA"}
+# Canonical PF1e ability score order
+_ABILITY_ORDER = ["STR", "DEX", "CON", "INT", "WIS", "CHA"]
+_ABILITY_SORT  = {abbr: i for i, abbr in enumerate(_ABILITY_ORDER)}
+
+# AC-family stat names — floated to the top of the Combat group
+_AC_NAMES = {
+    "ac", "armor class",
+    "touch ac", "touch armor class",
+    "flat-footed ac", "flat-footed armor class",
+    "cmd", "combat maneuver defense",
+}
+
+# Stats excluded from this panel — not useful on the base stat sheet
+# Ability modifier rows are redundant: the modifier is shown inline via _COL_EXTRA
+_EXCLUDED_STAT_NAMES = {
+    "attack roll", "damage roll",
+    "attack", "damage",
+    "strength modifier", "dexterity modifier", "constitution modifier",
+    "intelligence modifier", "wisdom modifier", "charisma modifier",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +177,8 @@ _COL_FINAL = 3
 _COL_EXTRA = 4   # ability modifier (ability scores only), blank for others
 
 _COL_COUNT = 5
-_COL_HEADERS = ["Stat", "Base", "Bonus", "Final", ""]
+_COL_HEADERS = ["Stat", "Base", "Bonus", "Final", "Mod"]
+
 
 
 class StatTable(QTableWidget):
@@ -193,7 +212,7 @@ class StatTable(QTableWidget):
         self.setColumnWidth(_COL_BASE,  56)
         self.setColumnWidth(_COL_MOD,   56)
         self.setColumnWidth(_COL_FINAL, 56)
-        self.setColumnWidth(_COL_EXTRA, 56)
+        self.setColumnWidth(_COL_EXTRA, 48)
 
         self.cellClicked.connect(self._on_cell_clicked)
 
@@ -214,17 +233,36 @@ class StatTable(QTableWidget):
         self.setRowCount(0)
         self._row_data.clear()
 
-        # Group by category preserving _CATEGORY_ORDER
+        # Group by category preserving _CATEGORY_ORDER, excluding unwanted stats
         grouped: dict[str, list[dict]] = {c: [] for c in _CATEGORY_ORDER}
         for s in stats:
+            if s.get("name", "").lower() in _EXCLUDED_STAT_NAMES:
+                continue
             cat = s.get("category", "other").lower()
             grouped.setdefault(cat, [])
             grouped[cat].append(s)
+
+        # Sort each group appropriately
+        def _ability_key(s):
+            return _ABILITY_SORT.get(s.get("abbreviation", ""), 99)
+
+        def _combat_key(s):
+            # AC-family stats float to top (sort key 0), rest alphabetical after
+            is_ac = s.get("name", "").lower() in _AC_NAMES
+            return (0 if is_ac else 1, s.get("name", ""))
+
+        _sort_fns = {
+            "ability": _ability_key,
+            "combat":  _combat_key,
+        }
 
         for cat in _CATEGORY_ORDER:
             rows = grouped.get(cat, [])
             if not rows:
                 continue
+            sort_fn = _sort_fns.get(cat)
+            if sort_fn:
+                rows = sorted(rows, key=sort_fn)
 
             # ---- category header row ----
             header_row = self.rowCount()
@@ -277,11 +315,9 @@ class StatTable(QTableWidget):
 
     def _update_row_cells(self, row: int, stat: dict):
         name  = stat.get("name", "")
-        abbr  = stat.get("abbreviation", "")
         base  = stat.get("base_value", 0)
         mod   = stat.get("net_modifier", 0)
         final = stat.get("final_value", base + mod)
-        cat   = stat.get("category", "").lower()
 
         # Stat name cell
         name_item = QTableWidgetItem(name)
@@ -317,16 +353,19 @@ class StatTable(QTableWidget):
             final_item.setForeground(QColor(palette["text_primary"]))
         self.setItem(row, _COL_FINAL, final_item)
 
-        # Extra column: ability modifier for ability scores
-        if cat == "ability" and abbr in _ABILITY_ABBREVS:
+        # Ability modifier column — ability scores only
+        abbr = stat.get("abbreviation", "")
+        cat  = stat.get("category", "").lower()
+        if cat == "ability" and abbr in {"STR", "DEX", "CON", "INT", "WIS", "CHA"}:
             ab_mod = _modifier_from_score(final)
             extra_item = QTableWidgetItem(_signed(ab_mod))
             extra_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             extra_item.setForeground(QColor(palette["turquoise"]))
-            extra_item.setToolTip("Ability modifier (used for skill/attack rolls)")
-            self.setItem(row, _COL_EXTRA, extra_item)
+            extra_item.setToolTip("Ability modifier")
         else:
-            self.setItem(row, _COL_EXTRA, QTableWidgetItem(""))
+            extra_item = QTableWidgetItem("")
+        self.setItem(row, _COL_EXTRA, extra_item)
+
 
     def _on_cell_clicked(self, row: int, _col: int):
         data = self._row_data[row] if row < len(self._row_data) else None
