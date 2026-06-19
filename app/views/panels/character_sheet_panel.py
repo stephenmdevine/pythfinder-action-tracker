@@ -1,28 +1,10 @@
-"""
-character_sheet_panel.py
-
-Character Sheet panel — Phase 1: Base stats + resolved modifiers.
-
-Layout (three columns, splitter-separated):
-  LEFT   — Character selector (campaign → character dropdowns) + character header card
-  CENTER — Stat table grouped by category (Ability / Combat / Save / Other),
-            showing Base | Modifier | Final for every stat
-  RIGHT  — Modifier breakdown for the selected stat row
-            (contributing effects + suppressed effects)
-
-The panel is stateless between loads; calling load_character() rebuilds
-everything from the controller.
-
-Signal flow:
-  campaign_combo → _on_campaign_changed → repopulate character_combo
-  character_combo → _on_character_changed → load_character()
-  stat table row selected → _on_stat_selected → populate breakdown pane
-"""
+"""\ncharacter_sheet_panel.py\n\nCharacter Sheet panel — stats, skills, and resolved modifiers.\n\nLayout (three columns, splitter-separated):\n  LEFT   — Character selector (campaign → character dropdowns) + character header card\n  CENTER — QTabWidget with two tabs:\n             Stats: stat table grouped by category (Ability / Combat / Save / Other)\n             Skills: skill table (Skill | Ability | Ranks | Total)\n  RIGHT  — Modifier breakdown for the selected row (contributing effects by\n             bonus type + suppressed effects); skill rows prepend the ability\n             modifier as its own entry before stacking-engine effects\n\nThe panel is stateless between loads; calling load_character() rebuilds\neverything from the controller.\n\nSignal flow:\n  campaign_combo → _on_campaign_changed → repopulate character_combo\n  character_combo → _on_character_changed → load_character()\n  stat/skill table row selected → _on_stat/skill_selected → populate breakdown pane\n"""
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QSplitter, QComboBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QScrollArea, QSizePolicy, QAbstractItemView,
+    QTabWidget,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont, QColor
@@ -480,22 +462,43 @@ class BreakdownPane(QWidget):
         self.setStyleSheet(f"background-color: {palette['bg_surface']};")
 
     def populate(self, stat: dict):
-        name    = stat.get("name", "Stat")
-        base    = stat.get("base_value", 0)
-        mod     = stat.get("net_modifier", 0)
-        final   = stat.get("final_value", base + mod)
-        contrib = stat.get("breakdown", [])
+        name       = stat.get("name", "Stat")
+        contrib    = list(stat.get("breakdown", []))
         suppressed = stat.get("suppressed", [])
 
         self._header.setText(name)
 
-        # Summary line
-        if mod != 0:
+        # Skill rows carry ranks + ability modifier separately from the
+        # stacking engine. Build a skill-aware summary and prepend the
+        # ability modifier as a synthetic contributing entry.
+        is_skill = "ranks" in stat
+        if is_skill:
+            ranks   = stat.get("ranks", 0)
+            ab_abbr = stat.get("ability_abbr", "")
+            ab_mod  = stat.get("ability_modifier", 0)
+            net_mod = stat.get("net_modifier", 0)
+            total   = ranks + ab_mod + net_mod
+            parts = []
+            if ranks:
+                parts.append(f"{ranks} rank" + ("s" if ranks != 1 else ""))
+            if ab_abbr:
+                parts.append(f"{ab_abbr} {_signed(ab_mod)}")
+            if net_mod:
+                parts.append(f"{_signed(net_mod)} other bonuses")
             self._summary.setText(
-                f"Base {base}  {_signed(mod)} active bonuses  =  {final}"
+                ("  +  ".join(parts) + f"  =  {_signed(total)}") if parts
+                else "No ranks or bonuses"
             )
+            if ab_abbr:
+                contrib = [{"source_name": ab_abbr, "bonus_type_name": "Ability Modifier", "modifier": ab_mod}] + contrib
         else:
-            self._summary.setText(f"Base {base}  (no active modifiers)")
+            base  = stat.get("base_value", 0)
+            mod   = stat.get("net_modifier", 0)
+            final = stat.get("final_value", base + mod)
+            if mod != 0:
+                self._summary.setText(f"Base {base}  {_signed(mod)} active bonuses  =  {final}")
+            else:
+                self._summary.setText(f"Base {base}  (no active modifiers)")
 
         # Clear old effect rows (keep the stretch at end)
         while self._effects_layout.count() > 1:
@@ -553,6 +556,140 @@ class BreakdownPane(QWidget):
             if item.widget():
                 item.widget().deleteLater()
 
+
+
+# ---------------------------------------------------------------------------
+# SKILL TABLE
+# ---------------------------------------------------------------------------
+
+# Column indices for the skill table
+_SK_NAME   = 0
+_SK_ABIL   = 1   # ability abbreviation + live modifier, e.g. "DEX (+2)"
+_SK_RANKS  = 2   # base_value from character_stats
+_SK_TOTAL  = 3   # ranks + ability mod + net stacking-engine modifier
+
+_SK_COUNT   = 4
+_SK_HEADERS = ["Skill", "Ability", "Ranks", "Total"]
+
+
+class SkillTable(QTableWidget):
+    """
+    Flat alphabetical list of all skill-category stats for a character.
+    Columns: Skill | Ability (live mod) | Ranks | Total
+
+    Total = ranks (base_value) + ability_modifier + net_modifier (stacking engine)
+
+    Emits skill_selected(skill_row_dict) when a row is clicked.
+    skill_row_dict shape matches what BreakdownPane.populate() expects, with
+    extra keys: "ranks", "ability_abbr", "ability_modifier".
+    """
+
+    skill_selected = pyqtSignal(dict)
+
+    def __init__(self, parent=None):
+        super().__init__(0, _SK_COUNT, parent)
+
+        self.setHorizontalHeaderLabels(_SK_HEADERS)
+        self.setObjectName("skill_table")
+        self.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.verticalHeader().setVisible(False)
+        self.setShowGrid(False)
+        self.setAlternatingRowColors(False)
+        self.setSortingEnabled(True)
+
+        hh = self.horizontalHeader()
+        hh.setSectionResizeMode(_SK_NAME,  QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(_SK_ABIL,  QHeaderView.ResizeMode.Fixed)
+        hh.setSectionResizeMode(_SK_RANKS, QHeaderView.ResizeMode.Fixed)
+        hh.setSectionResizeMode(_SK_TOTAL, QHeaderView.ResizeMode.Fixed)
+        self.setColumnWidth(_SK_ABIL,  90)
+        self.setColumnWidth(_SK_RANKS, 52)
+        self.setColumnWidth(_SK_TOTAL, 56)
+
+        self.cellClicked.connect(self._on_cell_clicked)
+        self._row_data: list[dict] = []
+
+    # ------------------------------------------------------------------
+    # PUBLIC
+    # ------------------------------------------------------------------
+
+    def populate(self, skills: list[dict]):
+        """
+        Rebuild from a list of skill dicts produced by
+        CharacterSheetController.get_skill_stats().
+
+        Expected keys per dict:
+            stat_id, name, ability_abbr, ability_modifier,
+            ranks (base_value), net_modifier (from stacking engine),
+            breakdown, suppressed
+        """
+        self.setSortingEnabled(False)
+        self.clearContents()
+        self.setRowCount(0)
+        self._row_data.clear()
+
+        for skill in sorted(skills, key=lambda s: s.get("name", "")):
+            self._insert_skill_row(skill)
+
+        self.setSortingEnabled(True)
+
+    def clear_skills(self):
+        self.clearContents()
+        self.setRowCount(0)
+        self._row_data.clear()
+
+    # ------------------------------------------------------------------
+    # PRIVATE
+    # ------------------------------------------------------------------
+
+    def _insert_skill_row(self, skill: dict):
+        row = self.rowCount()
+        self.insertRow(row)
+        self.setRowHeight(row, 28)
+        self._row_data.append(skill)
+
+        ranks      = skill.get("ranks", 0)
+        ab_abbr    = skill.get("ability_abbr", "")
+        ab_mod     = skill.get("ability_modifier", 0)
+        net_mod    = skill.get("net_modifier", 0)
+        total      = ranks + ab_mod + net_mod
+
+        # Skill name
+        name_item = QTableWidgetItem(skill.get("name", ""))
+        name_item.setData(Qt.ItemDataRole.UserRole, skill)
+        self.setItem(row, _SK_NAME, name_item)
+
+        # Ability column: "DEX (+2)"
+        ab_text = f"{ab_abbr} ({_signed(ab_mod)})" if ab_abbr else "—"
+        ab_item = QTableWidgetItem(ab_text)
+        ab_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        ab_item.setForeground(QColor(palette["text_secondary"]))
+        self.setItem(row, _SK_ABIL, ab_item)
+
+        # Ranks
+        ranks_item = QTableWidgetItem(str(ranks))
+        ranks_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        ranks_item.setForeground(
+            QColor(palette["turquoise"]) if ranks > 0 else QColor(palette["text_muted"])
+        )
+        self.setItem(row, _SK_RANKS, ranks_item)
+
+        # Total — gold and bold when non-zero
+        total_item = QTableWidgetItem(_signed(total))
+        total_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        total_font = QFont("Segoe UI", 11, QFont.Weight.Bold)
+        total_item.setFont(total_font)
+        total_item.setForeground(
+            QColor(palette["gold"]) if total != 0 else QColor(palette["text_muted"])
+        )
+        self.setItem(row, _SK_TOTAL, total_item)
+
+    def _on_cell_clicked(self, row: int, _col: int):
+        if row < len(self._row_data):
+            self.skill_selected.emit(self._row_data[row])
 
 # ---------------------------------------------------------------------------
 # MAIN PANEL
@@ -697,16 +834,34 @@ class CharacterSheetPanel(QWidget):
         return pane
 
     def _build_center_pane(self) -> QWidget:
-        pane = QWidget()
-        layout = QVBoxLayout(pane)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        self._center_tabs = QTabWidget()
+        self._center_tabs.setDocumentMode(True)
+
+        # ── Stats tab ──────────────────────────────────────────────────
+        stats_widget = QWidget()
+        stats_layout = QVBoxLayout(stats_widget)
+        stats_layout.setContentsMargins(0, 0, 0, 0)
+        stats_layout.setSpacing(0)
 
         self._stat_table = StatTable()
         self._stat_table.stat_selected.connect(self._on_stat_selected)
-        layout.addWidget(self._stat_table)
+        stats_layout.addWidget(self._stat_table)
 
-        return pane
+        self._center_tabs.addTab(stats_widget, "Stats")
+
+        # ── Skills tab ─────────────────────────────────────────────────
+        skills_widget = QWidget()
+        skills_layout = QVBoxLayout(skills_widget)
+        skills_layout.setContentsMargins(0, 0, 0, 0)
+        skills_layout.setSpacing(0)
+
+        self._skill_table = SkillTable()
+        self._skill_table.skill_selected.connect(self._on_skill_selected)
+        skills_layout.addWidget(self._skill_table)
+
+        self._center_tabs.addTab(skills_widget, "Skills")
+
+        return self._center_tabs
 
     def _build_right_pane(self) -> QWidget:
         self._breakdown_pane = BreakdownPane()
@@ -752,7 +907,17 @@ class CharacterSheetPanel(QWidget):
 
     def _load_character(self, character_id: int):
         self._current_character_id = character_id
+        print(f"[DEBUG] _load_character called with id={character_id!r}")
+
         result = self._controller.get_character_sheet(character_id)
+        print(f"[DEBUG] get_character_sheet: success={result['success']}, message={result['message']!r}")
+        if result.get('data'):
+            print(f"[DEBUG] data keys: {list(result['data'].keys())}")
+            print(f"[DEBUG] character: {result['data'].get('character')}")
+            print(f"[DEBUG] level: {result['data'].get('level')}")
+            print(f"[DEBUG] stats count: {len(result['data'].get('stats', []))}")
+        else:
+            print(f"[DEBUG] data is None or empty")
 
         if not result["success"]:
             self._header_card.clear()
@@ -769,8 +934,15 @@ class CharacterSheetPanel(QWidget):
         level_history = self._build_class_summary(character_id)
         self._header_card.populate(character, level, level_history)
 
-        # Stat table
+        # Stat table (excludes skill-category stats)
         self._stat_table.populate(data["stats"])
+
+        # Skill table
+        skill_result = self._controller.get_skill_stats(character_id)
+        if skill_result["success"]:
+            self._skill_table.populate(skill_result["data"])
+        else:
+            self._skill_table.clear_skills()
 
         # Clear breakdown (no row selected yet)
         self._breakdown_pane.clear()
@@ -821,15 +993,20 @@ class CharacterSheetPanel(QWidget):
 
     def _on_character_changed(self, index: int):
         character_id = self._character_combo.itemData(index)
+        print(f"[DEBUG] _on_character_changed: index={index}, character_id={character_id!r}")
         if character_id is None:
             self._header_card.clear()
             self._stat_table.populate([])
+            self._skill_table.clear_skills()
             self._breakdown_pane.clear()
             return
         self._load_character(character_id)
 
     def _on_stat_selected(self, stat: dict):
         self._breakdown_pane.populate(stat)
+
+    def _on_skill_selected(self, skill: dict):
+        self._breakdown_pane.populate(skill)
 
     # ------------------------------------------------------------------
     # UTILITIES

@@ -1,230 +1,395 @@
-from app.controllers.base_controller import BaseController
+"""
+character_sheet_controller.py
+
+Controller for the Character Sheet panel.
+Handles fetching base stats, resolving stacked modifiers, and character metadata.
+Returns {"success": bool, "data": any, "message": str} dicts throughout.
+"""
+
 from app.models.character_model import CharacterModel
 from app.models.stat_model import StatModel
 from app.models.effect_model import BonusTypeModel
+from app.models.point_pool_model import PointPoolModel
 from app.models.source_model import SourceModel
+from app.controllers.base_controller import BaseController
 
-# PF1e light load limits by Strength score (lbs)
-# Index = Strength score. Scores above 29 follow a x4 pattern per +10 STR.
-_LIGHT_LOAD_BY_STR = {
-    1: 3,   2: 6,   3: 10,  4: 13,  5: 16,  6: 20,  7: 23,  8: 26,
-    9: 30,  10: 33, 11: 38, 12: 43, 13: 50, 14: 58, 15: 66, 16: 76,
-    17: 86, 18: 100,19: 116,20: 133,21: 153,22: 173,23: 200,24: 233,
-    25: 266,26: 306,27: 346,28: 400,29: 466,
+
+# PF1e skill → governing ability abbreviation
+# Used to pull the live ability modifier for each skill row.
+_SKILL_ABILITY: dict[str, str] = {
+    "Acrobatics":          "DEX",
+    "Appraise":            "INT",
+    "Bluff":               "CHA",
+    "Climb":               "STR",
+    "Craft":               "INT",
+    "Diplomacy":           "CHA",
+    "Disable Device":      "DEX",
+    "Disguise":            "CHA",
+    "Escape Artist":       "DEX",
+    "Fly":                 "DEX",
+    "Handle Animal":       "CHA",
+    "Heal":                "WIS",
+    "Intimidate":          "CHA",
+    "Knowledge (Arcana)":          "INT",
+    "Knowledge (Dungeoneering)":   "INT",
+    "Knowledge (Engineering)":     "INT",
+    "Knowledge (Geography)":       "INT",
+    "Knowledge (History)":         "INT",
+    "Knowledge (Local)":           "INT",
+    "Knowledge (Nature)":          "INT",
+    "Knowledge (Nobility)":        "INT",
+    "Knowledge (Planes)":          "INT",
+    "Knowledge (Religion)":        "INT",
+    "Linguistics":         "INT",
+    "Perception":          "WIS",
+    "Perform":             "CHA",
+    "Profession":          "WIS",
+    "Ride":                "DEX",
+    "Sense Motive":        "WIS",
+    "Sleight of Hand":     "DEX",
+    "Spellcraft":          "INT",
+    "Stealth":             "DEX",
+    "Survival":            "WIS",
+    "Swim":                "STR",
+    "Use Magic Device":    "CHA",
 }
 
-
-def _light_load_limit(strength_score: int) -> float:
+def _governing_ability(skill_name: str) -> str:
     """
-    Returns the light load limit in lbs for a given Strength score.
-    Handles scores above 29 using PF1e's x4-per-10 progression.
+    Return the governing ability abbreviation for a skill.
+    Handles Craft/Perform/Profession/Knowledge variants by prefix match.
+    Falls back to empty string if unknown (custom skills).
     """
-    if strength_score <= 0:
-        return 0.0
-    if strength_score <= 29:
-        return float(_LIGHT_LOAD_BY_STR.get(strength_score, 0))
-    # Each +10 STR above 29 multiplies the limit by 4
-    steps  = (strength_score - 20) // 10
-    base   = _LIGHT_LOAD_BY_STR[29]
-    return float(base * (4 ** steps))
+    if skill_name in _SKILL_ABILITY:
+        return _SKILL_ABILITY[skill_name]
+    for prefix in ("Craft", "Perform", "Profession", "Knowledge"):
+        if skill_name.startswith(prefix):
+            return _SKILL_ABILITY[prefix]
+    return ""
 
 
 class CharacterSheetController(BaseController):
-    """
-    Assembles the full resolved view of a character:
-        - Base stat values from character_stats
-        - Active modifiers resolved through the stacking engine
-        - Final computed values (base + net modifier)
-        - Active sources summary
-        - Encumbrance
-
-    This controller is read-heavy — it gathers and shapes data for display.
-    Writes (setting base values, activating sources) are small and targeted.
-    """
 
     def __init__(self):
-        self.characters  = CharacterModel()
-        self.stats       = StatModel()
-        self.bonus_types = BonusTypeModel()
-        self.sources     = SourceModel()
+        self.character_model = CharacterModel()
+        self.stat_model      = StatModel()
+        self.bonus_type_model = BonusTypeModel()
+        self.source_model    = SourceModel()
+        self.point_pool_model = PointPoolModel()
 
     # ------------------------------------------------------------------
-    # FULL CHARACTER SHEET
+    # Character metadata
     # ------------------------------------------------------------------
 
     def get_character_sheet(self, character_id: int) -> dict:
         """
-        Returns a fully resolved character sheet dict:
+        Assembles the full stat sheet for the panel in one call.
+        Returns:
         {
-            "character":   { ...character row... },
-            "level":       int,
-            "stats": [
-                {
-                    "stat_id":      int,
-                    "name":         str,
-                    "abbreviation": str,
-                    "category":     str,
-                    "base_value":   int,
-                    "net_modifier": int,
-                    "final_value":  int,
-                    "breakdown":    [ ...contributing effect rows... ],
-                    "suppressed":   [ ...suppressed effect rows... ],
-                },
-                ...
-            ],
-            "active_sources": [ ...character_source rows... ],
-            "encumbrance": {
-                "total_weight_lbs": float,
-                "light_load_limit": float,
-                "label":            str,   # 'Light', 'Medium', 'Heavy', 'Over Limit'
-            }
+            "character": { ...character row... },
+            "level":     int,
+            "stats":     [ ...resolved stat rows, skill category excluded... ],
+        }
+        Skill data is fetched separately via get_skill_stats() so each
+        section can fail and be handled independently.
+        """
+        try:
+            character = self.character_model.get_by_id(character_id)
+            if not character:
+                return {"success": False, "data": None,
+                        "message": f"Character {character_id} not found."}
+
+            level = self.character_model.get_current_level(character_id)
+
+            stats_result = self.get_effective_stat_values(character_id)
+            if not stats_result["success"]:
+                return stats_result
+
+            # Exclude skill-category rows — those go to the Skills tab
+            stats = [
+                s for s in stats_result["data"]
+                if s.get("stat_category", "").lower() != "skill"
+            ]
+
+            return {"success": True, "data": {
+                "character": character,
+                "level":     level,
+                "stats":     stats,
+            }, "message": ""}
+        except Exception as e:
+            return {"success": False, "data": None, "message": str(e)}
+
+
+    def get_character(self, character_id: int) -> dict:
+        """Return full character row plus derived display fields."""
+        try:
+            character = self.character_model.get_by_id(character_id)
+            if not character:
+                return {"success": False, "data": None, "message": "Character not found."}
+            return {"success": True, "data": character, "message": ""}
+        except Exception as e:
+            return {"success": False, "data": None, "message": str(e)}
+
+    def get_character_levels(self, character_id: int) -> dict:
+        """Return all level rows for a character, ordered ascending."""
+        try:
+            rows = self.character_model.get_level_history(character_id)
+            return {"success": True, "data": rows, "message": ""}
+        except Exception as e:
+            return {"success": False, "data": [], "message": str(e)}
+
+    # ------------------------------------------------------------------
+    # Stats & resolved modifiers
+    # ------------------------------------------------------------------
+
+    def get_all_stats(self) -> dict:
+        """Return every stat definition row."""
+        try:
+            rows = self.stat_model.get_all()
+            return {"success": True, "data": rows, "message": ""}
+        except Exception as e:
+            return {"success": False, "data": [], "message": str(e)}
+
+    def get_base_stat_values(self, character_id: int) -> dict:
+        """
+        Return a dict keyed by stat_id of the character's base stat values
+        (the raw numbers stored in character_stats, not yet modified by sources).
+        Shape: {stat_id: {"stat_id": int, "stat_name": str, "base_value": int}}
+        """
+        try:
+            rows = self.stat_model.get_all_base_values(character_id)
+            data = {r["stat_id"]: r for r in rows}
+            return {"success": True, "data": data, "message": ""}
+        except Exception as e:
+            return {"success": False, "data": {}, "message": str(e)}
+
+    def get_resolved_modifiers(self, character_id: int) -> dict:
+        """
+        Run the stacking engine for every stat and return a list of resolved
+        modifier summaries, one entry per stat that has at least one active effect.
+
+        Each entry:
+        {
+            "stat_id": int,
+            "stat_name": str,
+            "net_modifier": int,       # after stacking rules applied
+            "contributing": [...],     # effects that count
+            "suppressed": [...],       # typed bonuses overridden by a higher same-type
         }
         """
-        character = self.characters.get_by_id(character_id)
-        if not character:
-            return self._err(f"Character {character_id} not found.")
-
         try:
-            level         = self.characters.get_current_level(character_id)
-            base_values   = self.stats.get_all_base_values(character_id)
-            active_sources = self.sources.get_character_sources(
-                character_id, active_only=True
-            )
-            encumbrance = self._resolve_encumbrance(character_id, base_values)
+            stats_result = self.get_all_stats()
+            if not stats_result["success"]:
+                return {"success": False, "data": [], "message": stats_result["message"]}
 
-            stat_rows = []
-            for row in base_values:
-                resolution = self.bonus_types.resolve_modifiers_for_stat(
-                    character_id, row["stat_id"]
+            resolved = []
+            for stat in stats_result["data"]:
+                stat_id = stat["id"]
+                result = self.bonus_type_model.resolve_modifiers_for_stat(
+                    character_id=character_id,
+                    stat_id=stat_id,
                 )
-                final_value = self.stats.get_computed_value(
-                    character_id,
-                    row["stat_id"],
-                    resolution["net_modifier"],
-                )
-                stat_rows.append({
-                    "stat_id":      row["stat_id"],
-                    "name":         row["name"],
-                    "abbreviation": row["abbreviation"],
-                    "category":     row["category"],
-                    "base_value":   row["base_value"],
-                    "net_modifier": resolution["net_modifier"],
-                    "final_value":  final_value,
-                    "breakdown":    resolution["effects"],
-                    "suppressed":   resolution["suppressed"],
+                # resolve_modifiers_for_stat returns a dict with at least:
+                # {"net_modifier": int, "contributing": [...], "suppressed": [...]}
+                if result["net_modifier"] != 0 or result["effects"]:
+                    resolved.append({
+                        "stat_id": stat_id,
+                        "stat_name": stat["name"],
+                        "net_modifier": result["net_modifier"],
+                        "effects": result.get("effects", []),
+                        "suppressed": result.get("suppressed", []),
+                    })
+
+            return {"success": True, "data": resolved, "message": ""}
+        except Exception as e:
+            return {"success": False, "data": [], "message": str(e)}
+
+    def get_effective_stat_values(self, character_id: int) -> dict:
+        """
+        Merge base values with resolved modifiers to produce the final displayed
+        value for each stat.
+
+        Returns a list of dicts:
+        {
+            "stat_id": int,
+            "stat_name": str,
+            "base_value": int,
+            "net_modifier": int,
+            "effective_value": int,
+            "contributing": [...],
+            "suppressed": [...],
+        }
+        Sorted by stat category then name (ability scores first, then combat stats, then saves).
+        """
+        try:
+            base_result = self.get_base_stat_values(character_id)
+            mod_result = self.get_resolved_modifiers(character_id)
+            stats_result = self.get_all_stats()
+
+            if not base_result["success"]:
+                return base_result
+            if not mod_result["success"]:
+                return mod_result
+            if not stats_result["success"]:
+                return stats_result
+
+            base_map = base_result["data"]           # {stat_id: row}
+            mod_map = {r["stat_id"]: r for r in mod_result["data"]}
+
+            rows = []
+            for stat in stats_result["data"]:
+                sid = stat["id"]
+                base_row = base_map.get(sid, {})
+                mod_row = mod_map.get(sid, {})
+
+                base_val = base_row.get("base_value", 0)
+                net_mod = mod_row.get("net_modifier", 0)
+
+                rows.append({
+                    "stat_id": sid,
+                    "name": stat["name"],
+                    "abbreviation": stat.get("abbreviation", ""),
+                    "category": stat.get("category", ""),
+                    "stat_category": stat.get("category", ""),
+                    "base_value": base_val,
+                    "net_modifier": net_mod,
+                    "final_value": base_val + net_mod,
+                    "breakdown": mod_row.get("effects", []),
+                    "suppressed": mod_row.get("suppressed", []),
                 })
 
-            return self._ok({
-                "character":      character,
-                "level":          level,
-                "stats":          stat_rows,
-                "active_sources": active_sources,
-                "encumbrance":    encumbrance,
-            })
-        except Exception as e:
-            return self._err(f"Failed to build character sheet: {e}")
+            # Sort: ability scores first, then combat, then saves, then rest
+            category_order = {
+                "ability": 0,
+                "combat": 1,
+                "save": 2,
+            }
+            rows.sort(key=lambda r: (
+                category_order.get(r["stat_category"].lower(), 9),
+                r["name"],
+            ))
 
-    def get_single_stat(self, character_id: int, stat_id: int) -> dict:
-        """
-        Returns the resolved value for a single stat.
-        Used to refresh one row in the UI after a source is toggled.
-        """
-        try:
-            base_value  = self.stats.get_base_value(character_id, stat_id)
-            resolution  = self.bonus_types.resolve_modifiers_for_stat(
-                character_id, stat_id
-            )
-            final_value = base_value + resolution["net_modifier"]
-            return self._ok({
-                "base_value":   base_value,
-                "net_modifier": resolution["net_modifier"],
-                "final_value":  final_value,
-                "breakdown":    resolution["effects"],
-                "suppressed":   resolution["suppressed"],
-            })
+            return {"success": True, "data": rows, "message": ""}
         except Exception as e:
-            return self._err(f"Failed to resolve stat: {e}")
+            return {"success": False, "data": [], "message": str(e)}
 
     # ------------------------------------------------------------------
-    # SETTING BASE STAT VALUES
+    # Active sources (for the modifier breakdown tooltip / detail pane)
     # ------------------------------------------------------------------
 
-    def set_base_stat(
-        self, character_id: int, stat_id: int, base_value: int
-    ) -> dict:
+    def get_active_sources(self, character_id: int) -> dict:
         """
-        Sets a character's base value for a stat.
-        Called from the character editor when the user inputs ability scores,
-        base attack bonus, saving throw bases, etc.
+        Return character sources that are currently active (is_active = 1).
         """
         try:
-            self.stats.set_base_value(character_id, stat_id, base_value)
-            return self.get_single_stat(character_id, stat_id)
+            rows = self.source_model.get_character_sources(character_id)
+            active = [r for r in rows if r.get("is_active")]
+            return {"success": True, "data": active, "message": ""}
         except Exception as e:
-            return self._err(f"Failed to set stat: {e}")
+            return {"success": False, "data": [], "message": str(e)}
 
-    def set_base_stats_bulk(
-        self, character_id: int, stat_values: dict[int, int]
-    ) -> dict:
-        """
-        Sets multiple base stat values at once.
-        stat_values: {stat_id: base_value, ...}
-        Used when first creating a character and entering the full stat block.
-        """
-        errors = []
+    def get_all_character_sources(self, character_id: int) -> dict:
+        """Return all sources assigned to a character regardless of active state."""
         try:
-            for stat_id, value in stat_values.items():
-                try:
-                    self.stats.set_base_value(character_id, stat_id, value)
-                except Exception as e:
-                    errors.append(f"Stat {stat_id}: {e}")
+            rows = self.source_model.get_character_sources(character_id)
+            return {"success": True, "data": rows, "message": ""}
+        except Exception as e:
+            return {"success": False, "data": [], "message": str(e)}
 
-            if errors:
-                return self._err(
-                    f"Some stats failed to save: {'; '.join(errors)}"
+    def activate_source(self, character_source_id: int) -> dict:
+        """Set a character source to active."""
+        try:
+            self.source_model.set_active(character_source_id, True)
+            return {"success": True, "data": None, "message": "Source activated."}
+        except Exception as e:
+            return {"success": False, "data": None, "message": str(e)}
+
+    def deactivate_source(self, character_source_id: int) -> dict:
+        """Set a character source to inactive."""
+        try:
+            self.source_model.set_active(character_source_id, False)
+            return {"success": True, "data": None, "message": "Source deactivated."}
+        except Exception as e:
+            return {"success": False, "data": None, "message": str(e)}
+
+    # ------------------------------------------------------------------
+    # Point pools
+    # ------------------------------------------------------------------
+
+    def get_point_pools(self, character_id: int) -> dict:
+        """Return all point pools for a character with current / max values."""
+        try:
+            rows = self.point_pool_model.get_for_character(character_id)
+            return {"success": True, "data": rows, "message": ""}
+        except Exception as e:
+            return {"success": False, "data": [], "message": str(e)}
+
+    def get_skill_stats(self, character_id: int) -> dict:
+        """
+        Return all skill-category stats for a character with:
+          - ranks       : base_value from character_stats
+          - ability_abbr: governing ability abbreviation (e.g. "DEX")
+          - ability_modifier: live resolved value of that ability score's modifier
+          - net_modifier: stacking engine result for bonuses applied directly
+                          to this skill stat (feats, racial, etc.)
+          - breakdown / suppressed: effect lists for the breakdown pane
+          - final_value: ranks + ability_modifier + net_modifier
+
+        Skills with no character_stats row yet are included with ranks = 0
+        so every core skill always appears on the sheet.
+        """
+        try:
+            # All skill stat definitions
+            all_skills = self.stat_model.get_all(category="skill")
+
+            # Character's recorded base values (ranks)
+            base_rows = self.stat_model.get_all_base_values(character_id)
+            ranks_map = {
+                r["stat_id"]: r["base_value"]
+                for r in base_rows
+                if r.get("category", "").lower() == "skill"
+            }
+
+            # Resolve all ability scores once so we can look up modifiers cheaply
+            ability_stats = self.stat_model.get_all(category="ability")
+            ability_finals: dict[str, int] = {}
+            for ab in ability_stats:
+                resolution = self.bonus_type_model.resolve_modifiers_for_stat(
+                    character_id, ab["id"]
                 )
-            return self._ok(message="Base stats saved.")
+                base_val = self.stat_model.get_base_value(character_id, ab["id"])
+                final_score = base_val + resolution["net_modifier"]
+                # Store modifier (not score) keyed by abbreviation
+                ability_finals[ab["abbreviation"]] = (final_score - 10) // 2
+
+            rows = []
+            for skill in all_skills:
+                sid        = skill["id"]
+                name       = skill["name"]
+                ranks      = ranks_map.get(sid, 0)
+                ab_abbr    = _governing_ability(name)
+                ab_mod     = ability_finals.get(ab_abbr, 0)
+
+                # Stacking engine for bonuses applied directly to this skill
+                resolution = self.bonus_type_model.resolve_modifiers_for_stat(
+                    character_id, sid
+                )
+                net_mod = resolution["net_modifier"]
+
+                rows.append({
+                    "stat_id":          sid,
+                    "name":             name,
+                    "category":         "skill",
+                    "ability_abbr":     ab_abbr,
+                    "ability_modifier": ab_mod,
+                    "ranks":            ranks,
+                    "net_modifier":     net_mod,
+                    "final_value":      ranks + ab_mod + net_mod,
+                    "breakdown":        resolution.get("effects", []),
+                    "suppressed":       resolution.get("suppressed", []),
+                })
+
+            return {"success": True, "data": rows, "message": ""}
         except Exception as e:
-            return self._err(f"Failed to save stats: {e}")
+            return {"success": False, "data": [], "message": str(e)}
 
-    # ------------------------------------------------------------------
-    # ENCUMBRANCE (internal helper)
-    # ------------------------------------------------------------------
-
-    def _resolve_encumbrance(
-        self, character_id: int, base_values: list[dict]
-    ) -> dict:
-        """
-        Resolves encumbrance for the character sheet.
-        Looks up the Strength score from base_values, computes the
-        light load limit, then fetches total carried weight.
-
-        Importing InventoryModel here (not at module level) avoids a
-        circular dependency since InventoryController also uses this controller.
-        """
-        from app.models.inventory_model import InventoryModel
-        inventory = InventoryModel()
-
-        str_score = next(
-            (r["base_value"] for r in base_values if r["abbreviation"] == "STR"),
-            10  # default to 10 if not set
-        )
-        # Also add any active STR modifiers
-        str_stat = self.stats.get_by_name("Strength")
-        str_bonus = 0
-        if str_stat:
-            resolution = self.bonus_types.resolve_modifiers_for_stat(
-                character_id, str_stat["id"]
-            )
-            str_bonus = resolution["net_modifier"]
-
-        effective_str   = str_score + str_bonus
-        light_limit     = _light_load_limit(effective_str)
-        total_weight    = inventory.get_total_weight(character_id)
-        label           = inventory.get_encumbrance_label(total_weight, light_limit)
-
-        return {
-            "total_weight_lbs": total_weight,
-            "light_load_limit": light_limit,
-            "label":            label,
-        }
