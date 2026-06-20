@@ -197,6 +197,7 @@ class CharacterInitDialog(QDialog):
         data = result["data"]
         self._all_stats = (
             data["ability"] + data["combat"] + data["saves"]
+            + data.get("other", [])
         )
 
         self._build_ability_section(data["ability"])
@@ -258,6 +259,22 @@ class CharacterInitDialog(QDialog):
             self._on_score_changed(score_stat["id"], 10)
 
             form.addRow(f"{abbr}  ({score_name}):", row_widget)
+
+        # Speed row — added below ability scores, same card
+        speed_row = QWidget()
+        speed_layout = QHBoxLayout(speed_row)
+        speed_layout.setContentsMargins(0, 0, 0, 0)
+        speed_layout.setSpacing(10)
+
+        self.speed_spin = QSpinBox()
+        self.speed_spin.setRange(0, 120)
+        self.speed_spin.setValue(30)
+        self.speed_spin.setSingleStep(5)
+        self.speed_spin.setSuffix(" ft.")
+        self.speed_spin.setFixedWidth(90)
+        speed_layout.addWidget(self.speed_spin)
+        speed_layout.addStretch()
+        form.addRow("Speed:", speed_row)
 
         self.stat_layout.addWidget(card)
 
@@ -423,7 +440,14 @@ class CharacterInitDialog(QDialog):
             else:
                 stat_values[stat_id] = spin.value()
 
-        # --- 2. Auto-init combat and save stats not shown in the UI ---
+        # --- 2. Save speed from its spinbox ---
+        speed_stat = next(
+            (s for s in self._all_stats if s["name"].lower() == "speed"), None
+        )
+        if speed_stat:
+            stat_values[speed_stat["id"]] = self.speed_spin.value()
+
+        # --- 3. Auto-init combat and save stats not shown in the UI ---
         shown_ids = set(stat_values.keys())
         for stat in self._all_stats:
             if stat["id"] not in shown_ids:
