@@ -54,6 +54,13 @@ _SKILL_ABILITY: dict[str, str] = {
     "Use Magic Device":    "CHA",
 }
 
+_PREFIX_ABILITY: dict[str, str] = {
+    "Craft":      "INT",
+    "Perform":    "CHA",
+    "Profession": "WIS",
+    "Knowledge":  "INT",
+}
+
 def _governing_ability(skill_name: str) -> str:
     """
     Return the governing ability abbreviation for a skill.
@@ -62,9 +69,9 @@ def _governing_ability(skill_name: str) -> str:
     """
     if skill_name in _SKILL_ABILITY:
         return _SKILL_ABILITY[skill_name]
-    for prefix in ("Craft", "Perform", "Profession", "Knowledge"):
+    for prefix, ability in _PREFIX_ABILITY.items():
         if skill_name.startswith(prefix):
-            return _SKILL_ABILITY[prefix]
+            return ability
     return ""
 
 
@@ -341,9 +348,13 @@ class CharacterSheetController(BaseController):
         try:
             # All skill stat definitions
             all_skills = self.stat_model.get_all(category="skill")
+            print(f"[DEBUG skills] all_skills count: {len(all_skills)}")
+            if all_skills:
+                print(f"[DEBUG skills] sample: {all_skills[0]}")
 
             # Character's recorded base values (ranks)
             base_rows = self.stat_model.get_all_base_values(character_id)
+            print(f"[DEBUG skills] base_rows count: {len(base_rows)}")
             ranks_map = {
                 r["stat_id"]: r["base_value"]
                 for r in base_rows

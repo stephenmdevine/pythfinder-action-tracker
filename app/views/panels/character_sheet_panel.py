@@ -571,6 +571,28 @@ _SK_TOTAL  = 3   # ranks + ability mod + net stacking-engine modifier
 _SK_COUNT   = 4
 _SK_HEADERS = ["Skill", "Ability", "Ranks", "Total"]
 
+# Skills that require at least 1 rank to use — shown dimmed at 0 ranks.
+# Prefix entries (ending with '*') match any skill starting with that string.
+_UNTRAINED_SKILLS: set[str] = {
+    "disable device",
+    "handle animal",
+    "linguistics",
+    "sleight of hand",
+    "spellcraft",
+    "use magic device",
+}
+_UNTRAINED_PREFIXES: tuple[str, ...] = (
+    "knowledge",
+    "profession",
+)
+
+def _requires_ranks(skill_name: str) -> bool:
+    """Return True if this skill cannot be used untrained."""
+    lower = skill_name.lower()
+    if lower in _UNTRAINED_SKILLS:
+        return True
+    return lower.startswith(_UNTRAINED_PREFIXES)
+
 
 class SkillTable(QTableWidget):
     """
@@ -651,41 +673,64 @@ class SkillTable(QTableWidget):
         self.setRowHeight(row, 28)
         self._row_data.append(skill)
 
+        name       = skill.get("name", "")
         ranks      = skill.get("ranks", 0)
         ab_abbr    = skill.get("ability_abbr", "")
         ab_mod     = skill.get("ability_modifier", 0)
         net_mod    = skill.get("net_modifier", 0)
         total      = ranks + ab_mod + net_mod
+        untrained  = _requires_ranks(name) and ranks == 0
 
-        # Skill name
-        name_item = QTableWidgetItem(skill.get("name", ""))
+        # Color scheme: dimmed for untrained+no ranks, normal otherwise
+        if untrained:
+            name_color  = QColor(palette["text_muted"])
+            ab_color    = QColor(palette["text_muted"])
+            ranks_color = QColor(palette["text_muted"])
+            total_color = QColor(palette["text_muted"])
+        else:
+            name_color  = QColor(palette["text_primary"])
+            ab_color    = QColor(palette["text_secondary"])
+            ranks_color = QColor(palette["turquoise"]) if ranks > 0 else QColor(palette["text_muted"])
+            total_color = QColor(palette["gold"]) if total != 0 else QColor(palette["text_muted"])
+
+        # Skill name — italic when untrained+no ranks
+        name_item = QTableWidgetItem(name)
         name_item.setData(Qt.ItemDataRole.UserRole, skill)
+        name_item.setForeground(name_color)
+        if untrained:
+            f = QFont("Segoe UI", 11)
+            f.setItalic(True)
+            name_item.setFont(f)
         self.setItem(row, _SK_NAME, name_item)
 
         # Ability column: "DEX (+2)"
         ab_text = f"{ab_abbr} ({_signed(ab_mod)})" if ab_abbr else "—"
         ab_item = QTableWidgetItem(ab_text)
         ab_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        ab_item.setForeground(QColor(palette["text_secondary"]))
+        ab_item.setForeground(ab_color)
         self.setItem(row, _SK_ABIL, ab_item)
 
         # Ranks
         ranks_item = QTableWidgetItem(str(ranks))
         ranks_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        ranks_item.setForeground(
-            QColor(palette["turquoise"]) if ranks > 0 else QColor(palette["text_muted"])
-        )
+        ranks_item.setForeground(ranks_color)
         self.setItem(row, _SK_RANKS, ranks_item)
 
-        # Total — gold and bold when non-zero
-        total_item = QTableWidgetItem(_signed(total))
+        # Total — em-dash for untrained+no ranks, signed value otherwise
+        total_text = "—" if untrained else _signed(total)
+        total_item = QTableWidgetItem(total_text)
         total_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         total_font = QFont("Segoe UI", 11, QFont.Weight.Bold)
         total_item.setFont(total_font)
-        total_item.setForeground(
-            QColor(palette["gold"]) if total != 0 else QColor(palette["text_muted"])
-        )
+        total_item.setForeground(total_color)
         self.setItem(row, _SK_TOTAL, total_item)
+
+        # Tooltip explaining why the row is dimmed
+        if untrained:
+            for col in range(_SK_COUNT):
+                item = self.item(row, col)
+                if item:
+                    item.setToolTip(f"{name} requires at least 1 rank to use.")
 
     def _on_cell_clicked(self, row: int, _col: int):
         if row < len(self._row_data):
@@ -907,17 +952,8 @@ class CharacterSheetPanel(QWidget):
 
     def _load_character(self, character_id: int):
         self._current_character_id = character_id
-        print(f"[DEBUG] _load_character called with id={character_id!r}")
 
         result = self._controller.get_character_sheet(character_id)
-        print(f"[DEBUG] get_character_sheet: success={result['success']}, message={result['message']!r}")
-        if result.get('data'):
-            print(f"[DEBUG] data keys: {list(result['data'].keys())}")
-            print(f"[DEBUG] character: {result['data'].get('character')}")
-            print(f"[DEBUG] level: {result['data'].get('level')}")
-            print(f"[DEBUG] stats count: {len(result['data'].get('stats', []))}")
-        else:
-            print(f"[DEBUG] data is None or empty")
 
         if not result["success"]:
             self._header_card.clear()
@@ -993,7 +1029,6 @@ class CharacterSheetPanel(QWidget):
 
     def _on_character_changed(self, index: int):
         character_id = self._character_combo.itemData(index)
-        print(f"[DEBUG] _on_character_changed: index={index}, character_id={character_id!r}")
         if character_id is None:
             self._header_card.clear()
             self._stat_table.populate([])
