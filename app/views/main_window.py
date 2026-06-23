@@ -35,8 +35,18 @@ class MainWindow(QMainWindow):
         self.resize(1280, 800)
 
         self._nav_buttons: list[QPushButton] = []
+        self._active_character_id: int | None = None
+        self._active_campaign_id:  int | None = None
         self._build_ui()
         self._navigate(0)   # open on Campaign Manager by default
+
+        # Wire active-character signals — both panels can drive activation
+        self.campaign_panel.character_activated.connect(
+            self.set_active_character
+        )
+        self.character_sheet_panel.character_activated.connect(
+            self.set_active_character
+        )
 
     # ------------------------------------------------------------------
     # UI CONSTRUCTION
@@ -106,6 +116,32 @@ class MainWindow(QMainWindow):
 
         layout.addStretch()
 
+        # Active character block
+        active_block = QWidget()
+        active_block.setStyleSheet(
+            f"background-color: {palette['bg_raised']};"
+            f"border-top: 1px solid {palette['border']};"
+        )
+        active_layout = QVBoxLayout(active_block)
+        active_layout.setContentsMargins(14, 8, 14, 8)
+        active_layout.setSpacing(2)
+
+        active_heading = QLabel("ACTIVE CHARACTER")
+        active_heading.setStyleSheet(
+            f"color: {palette['text_muted']}; font-size: 9px; "
+            f"font-weight: bold; letter-spacing: 1px;"
+        )
+
+        self._active_char_label = QLabel("None")
+        self._active_char_label.setStyleSheet(
+            f"color: {palette['turquoise']}; font-size: 12px; font-weight: bold;"
+        )
+        self._active_char_label.setWordWrap(True)
+
+        active_layout.addWidget(active_heading)
+        active_layout.addWidget(self._active_char_label)
+        layout.addWidget(active_block)
+
         # Version label at bottom
         version_label = QLabel(f"v{APP_VERSION}")
         version_label.setObjectName("label_muted")
@@ -120,7 +156,8 @@ class MainWindow(QMainWindow):
         self.stack.setObjectName("content_panel")
 
         # Index 0 — Campaign Manager
-        self.stack.addWidget(CampaignPanel(self))
+        self.campaign_panel = CampaignPanel(self)
+        self.stack.addWidget(self.campaign_panel)
 
         # Index 1 — Source Library
         self.stack.addWidget(SourceLibraryPanel(self))
@@ -137,6 +174,28 @@ class MainWindow(QMainWindow):
             "initiative, actions, source activation, and HP."))
 
         return self.stack
+
+    # ------------------------------------------------------------------
+    # ACTIVE CHARACTER
+    # ------------------------------------------------------------------
+
+    def set_active_character(self, character_id: int, campaign_id: int):
+        """
+        Called whenever the active character changes.
+        Broadcasts to every panel that tracks a character.
+        New panels (Inventory, Combat) should be added here when built.
+        """
+        self._active_character_id = character_id
+        self._active_campaign_id  = campaign_id
+
+        # Character Sheet
+        self.character_sheet_panel.set_character(character_id)
+
+        # Update status bar and sidebar label
+        name = self.character_sheet_panel.get_active_character_name()
+        label = name if name else f"Character #{character_id}"
+        self.status_bar.showMessage(f"Active character: {label}")
+        self._active_char_label.setText(label)
 
     # ------------------------------------------------------------------
     # NAVIGATION

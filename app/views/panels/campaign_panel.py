@@ -3,7 +3,7 @@ from PyQt6.QtWidgets import (
     QLabel, QPushButton, QListWidget, QListWidgetItem,
     QFrame, QMessageBox, QInputDialog, QLineEdit
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QFont
 
 from app.views.theme import palette
@@ -19,6 +19,10 @@ class CampaignPanel(QWidget):
     All data operations go through CampaignController.
     The view only calls controller methods and reads result dicts.
     """
+
+    # Emitted when the user explicitly selects a character to work with.
+    # Carries (character_id, campaign_id) so receivers have full context.
+    character_activated = pyqtSignal(int, int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -130,8 +134,17 @@ class CampaignPanel(QWidget):
         self.btn_new_char.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_new_char.clicked.connect(self._on_new_character)
 
+        self.btn_set_active = QPushButton("★  Set Active")
+        self.btn_set_active.setObjectName("secondary_button")
+        self.btn_set_active.setEnabled(False)
+        self.btn_set_active.setToolTip(
+            "Set this character as the active character across all panels."
+        )
+        self.btn_set_active.clicked.connect(self._on_set_active)
+
         header.addWidget(self.char_col_label)
         header.addStretch()
+        header.addWidget(self.btn_set_active)
         header.addWidget(self.btn_new_char)
         layout.addLayout(header)
 
@@ -294,6 +307,7 @@ class CampaignPanel(QWidget):
         self.btn_rename_char.setEnabled(has_selection)
         self.btn_level_up.setEnabled(has_selection)
         self.btn_delete_char.setEnabled(has_selection)
+        self.btn_set_active.setEnabled(has_selection)
 
         if has_selection:
             char_data = current.data(Qt.ItemDataRole.UserRole + 1)
@@ -398,6 +412,14 @@ class CampaignPanel(QWidget):
             self.char_detail.clear()
         else:
             self._show_error(result["message"])
+
+    def _on_set_active(self):
+        """Emit character_activated so MainWindow can broadcast to all panels."""
+        item = self.character_list.currentItem()
+        if not item or self.selected_campaign_id is None:
+            return
+        char_id = item.data(Qt.ItemDataRole.UserRole)
+        self.character_activated.emit(char_id, self.selected_campaign_id)
 
     # ------------------------------------------------------------------
     # HELPERS

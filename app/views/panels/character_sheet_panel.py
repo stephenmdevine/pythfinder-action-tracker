@@ -751,6 +751,9 @@ class CharacterSheetPanel(QWidget):
         CampaignPanel (or can self-select via its own campaign/character dropdowns)
     """
 
+    # Emitted when the user activates a character from this panel's dropdown.
+    character_activated = pyqtSignal(int, int)  # character_id, campaign_id
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
@@ -785,6 +788,12 @@ class CharacterSheetPanel(QWidget):
         """Re-load current character (e.g. after source toggle)."""
         if self._current_character_id:
             self._load_character(self._current_character_id)
+
+    def get_active_character_name(self) -> str:
+        """Return the name of the currently loaded character, or empty string."""
+        if self._sheet_data and self._sheet_data.get("character"):
+            return self._sheet_data["character"].get("name", "")
+        return ""
 
     # ------------------------------------------------------------------
     # UI CONSTRUCTION
@@ -864,6 +873,13 @@ class CharacterSheetPanel(QWidget):
         self._character_combo.setEnabled(False)
         self._character_combo.currentIndexChanged.connect(self._on_character_changed)
         layout.addWidget(self._character_combo)
+
+        self._btn_set_active = QPushButton("★  Set as Active")
+        self._btn_set_active.setObjectName("secondary_button")
+        self._btn_set_active.setEnabled(False)
+        self._btn_set_active.setToolTip("Activate this character across all panels.")
+        self._btn_set_active.clicked.connect(self._on_set_active)
+        layout.addWidget(self._btn_set_active)
 
         divider = QFrame()
         divider.setFrameShape(QFrame.Shape.HLine)
@@ -959,10 +975,12 @@ class CharacterSheetPanel(QWidget):
             self._header_card.clear()
             self._stat_table.populate([])
             self._breakdown_pane.clear()
+            self._btn_set_active.setEnabled(False)
             return
 
         data = result["data"]
         self._sheet_data = data
+        self._btn_set_active.setEnabled(True)
 
         # Header card
         character = data["character"]
@@ -1036,6 +1054,13 @@ class CharacterSheetPanel(QWidget):
             self._breakdown_pane.clear()
             return
         self._load_character(character_id)
+
+    def _on_set_active(self):
+        """Emit character_activated so MainWindow can broadcast to all panels."""
+        char_id     = self._character_combo.currentData()
+        campaign_id = self._campaign_combo.currentData()
+        if char_id and campaign_id:
+            self.character_activated.emit(char_id, campaign_id)
 
     def _on_stat_selected(self, stat: dict):
         self._breakdown_pane.populate(stat)
