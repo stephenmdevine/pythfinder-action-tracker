@@ -4,10 +4,10 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QSplitter, QComboBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QScrollArea, QSizePolicy, QAbstractItemView,
-    QTabWidget,
+    QTabWidget, QStyledItemDelegate, QStyleOptionViewItem,
 )
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont, QColor
+from PyQt6.QtCore import Qt, pyqtSignal, QRect
+from PyQt6.QtGui import QFont, QColor, QPainter, QPen
 
 from app.views.theme import palette, fonts
 from app.controllers.character_sheet_controller import CharacterSheetController
@@ -147,6 +147,129 @@ class _CharacterHeaderCard(QFrame):
         self.type_badge.setText("—")
 
 
+
+# ---------------------------------------------------------------------------
+# ABILITY ROW DELEGATE
+# Renders ability score rows as prominent mini-cards with large score,
+# abbreviation, full name subtitle, and modifier — all custom-painted.
+# ---------------------------------------------------------------------------
+
+_ABILITY_ROW_HEIGHT = 68
+
+class AbilityRowDelegate(QStyledItemDelegate):
+    """
+    Custom painter for ability score rows in StatTable.
+    Only activates for rows tagged with _ABILITY_ROW_ROLE = True.
+
+    Column layout mirrors the table columns but drawn as one cohesive unit:
+      COL_NAME  — abbreviation (large) + full name (small subtitle)
+      COL_BASE  — score value (very large, bold)
+      COL_MOD   — active bonus (+/-) in sign-coloured text
+      COL_FINAL — final score (large, gold if modified)
+      COL_EXTRA — ability modifier ((score-10)//2), turquoise
+    """
+
+    _ABILITY_ROW_ROLE = Qt.ItemDataRole.UserRole + 10  # tag role
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index):
+        stat = index.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(stat, dict) or stat.get("category", "").lower() != "ability":
+            super().paint(painter, option, index)
+            return
+
+        painter.save()
+        r = option.rect
+
+        # ── Background ────────────────────────────────────────────────────
+        is_selected = bool(option.state & option.state.State_Selected)
+        bg = QColor(palette["bg_hover"] if is_selected else palette["bg_raised"])
+        painter.fillRect(r, bg)
+
+        # Left accent bar
+        accent = QColor(palette["teal"])
+        painter.fillRect(QRect(r.left(), r.top(), 3, r.height()), accent)
+
+        # Bottom divider
+        painter.setPen(QPen(QColor(palette["border"]), 1))
+        painter.drawLine(r.left(), r.bottom(), r.right(), r.bottom())
+
+        col = index.column()
+
+        if col == _COL_NAME:
+            # Abbreviation — large
+            abbr = stat.get("abbreviation", "")
+            abbr_font = QFont("Segoe UI", 16, QFont.Weight.Bold)
+            painter.setFont(abbr_font)
+            painter.setPen(QColor(palette["text_primary"]))
+            abbr_rect = QRect(r.left() + 12, r.top() + 8, r.width() - 16, 28)
+            painter.drawText(abbr_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, abbr)
+
+            # Full name — small subtitle
+            name = stat.get("name", "")
+            name_font = QFont("Segoe UI", 9)
+            painter.setFont(name_font)
+            painter.setPen(QColor(palette["text_muted"]))
+            name_rect = QRect(r.left() + 12, r.top() + 36, r.width() - 16, 20)
+            painter.drawText(name_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, name)
+
+        elif col == _COL_BASE:
+            base = stat.get("base_value", 0)
+            font = QFont("Segoe UI", 22, QFont.Weight.Bold)
+            painter.setFont(font)
+            painter.setPen(QColor(palette["text_secondary"]))
+            painter.drawText(r, Qt.AlignmentFlag.AlignCenter, str(base))
+
+        elif col == _COL_MOD:
+            mod = stat.get("net_modifier", 0)
+            text = _signed(mod) if mod != 0 else "—"
+            font = QFont("Segoe UI", 13, QFont.Weight.Bold)
+            painter.setFont(font)
+            color = (palette["success"] if mod > 0
+                     else palette["danger"] if mod < 0
+                     else palette["text_muted"])
+            painter.setPen(QColor(color))
+            painter.drawText(r, Qt.AlignmentFlag.AlignCenter, text)
+
+        elif col == _COL_FINAL:
+            base  = stat.get("base_value", 0)
+            mod   = stat.get("net_modifier", 0)
+            final = stat.get("final_value", base + mod)
+            font  = QFont("Segoe UI", 22, QFont.Weight.Bold)
+            painter.setFont(font)
+            color = palette["gold"] if mod != 0 else palette["text_primary"]
+            painter.setPen(QColor(color))
+            painter.drawText(r, Qt.AlignmentFlag.AlignCenter, str(final))
+
+        elif col == _COL_EXTRA:
+            base  = stat.get("base_value", 0)
+            mod   = stat.get("net_modifier", 0)
+            final = stat.get("final_value", base + mod)
+            ab_mod = _modifier_from_score(final)
+
+            # Modifier value — large turquoise
+            font = QFont("Segoe UI", 15, QFont.Weight.Bold)
+            painter.setFont(font)
+            painter.setPen(QColor(palette["turquoise"]))
+            val_rect = QRect(r.left(), r.top() + 4, r.width(), 28)
+            painter.drawText(val_rect, Qt.AlignmentFlag.AlignCenter, _signed(ab_mod))
+
+            # "mod" label beneath
+            label_font = QFont("Segoe UI", 8)
+            painter.setFont(label_font)
+            painter.setPen(QColor(palette["text_muted"]))
+            label_rect = QRect(r.left(), r.top() + 34, r.width(), 18)
+            painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, "mod")
+
+        painter.restore()
+
+    def sizeHint(self, option, index):
+        stat = index.data(Qt.ItemDataRole.UserRole)
+        if isinstance(stat, dict) and stat.get("category", "").lower() == "ability":
+            return super().sizeHint(option, index).__class__(
+                super().sizeHint(option, index).width(), _ABILITY_ROW_HEIGHT
+            )
+        return super().sizeHint(option, index)
+
 # ---------------------------------------------------------------------------
 # STAT TABLE
 # ---------------------------------------------------------------------------
@@ -197,6 +320,11 @@ class StatTable(QTableWidget):
         self.setColumnWidth(_COL_EXTRA, 48)
 
         self.cellClicked.connect(self._on_cell_clicked)
+
+        # Ability row delegate — applied to all columns
+        self._ability_delegate = AbilityRowDelegate(self)
+        for col in range(_COL_COUNT):
+            self.setItemDelegateForColumn(col, self._ability_delegate)
 
         # Internal mapping: visual row index → stat dict (None for header rows)
         self._row_data: list[dict | None] = []
@@ -291,7 +419,8 @@ class StatTable(QTableWidget):
     def _insert_stat_row(self, stat: dict):
         row = self.rowCount()
         self.insertRow(row)
-        self.setRowHeight(row, 32)
+        is_ability = stat.get("category", "").lower() == "ability"
+        self.setRowHeight(row, _ABILITY_ROW_HEIGHT if is_ability else 32)
         self._row_data.append(stat)
         self._update_row_cells(row, stat)
 
@@ -301,20 +430,26 @@ class StatTable(QTableWidget):
         mod   = stat.get("net_modifier", 0)
         final = stat.get("final_value", base + mod)
 
-        # Stat name cell
+        # Stat name cell (also tags all other cells with stat dict for delegate)
         name_item = QTableWidgetItem(name)
         name_item.setData(Qt.ItemDataRole.UserRole, stat)
         self.setItem(row, _COL_NAME, name_item)
 
+        # Tag every cell with the stat dict so AbilityRowDelegate can read it
+        # from any column index during paint()
+        def _tag(item):
+            item.setData(Qt.ItemDataRole.UserRole, stat)
+            return item
+
         # Base value
-        base_item = QTableWidgetItem(str(base))
+        base_item = _tag(QTableWidgetItem(str(base)))
         base_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         base_item.setForeground(QColor(palette["text_secondary"]))
         self.setItem(row, _COL_BASE, base_item)
 
         # Net modifier — colored by sign
         mod_text = _signed(mod) if mod != 0 else "—"
-        mod_item = QTableWidgetItem(mod_text)
+        mod_item = _tag(QTableWidgetItem(mod_text))
         mod_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         if mod > 0:
             mod_item.setForeground(QColor(palette["success"]))
@@ -325,7 +460,7 @@ class StatTable(QTableWidget):
         self.setItem(row, _COL_MOD, mod_item)
 
         # Final value — bold, gold if modified
-        final_item = QTableWidgetItem(str(final))
+        final_item = _tag(QTableWidgetItem(str(final)))
         final_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         final_font = QFont("Segoe UI", 11, QFont.Weight.Bold)
         final_item.setFont(final_font)
@@ -340,12 +475,12 @@ class StatTable(QTableWidget):
         cat  = stat.get("category", "").lower()
         if cat == "ability" and abbr in {"STR", "DEX", "CON", "INT", "WIS", "CHA"}:
             ab_mod = _modifier_from_score(final)
-            extra_item = QTableWidgetItem(_signed(ab_mod))
+            extra_item = _tag(QTableWidgetItem(_signed(ab_mod)))
             extra_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             extra_item.setForeground(QColor(palette["turquoise"]))
             extra_item.setToolTip("Ability modifier")
         else:
-            extra_item = QTableWidgetItem("")
+            extra_item = _tag(QTableWidgetItem(""))
         self.setItem(row, _COL_EXTRA, extra_item)
 
 
