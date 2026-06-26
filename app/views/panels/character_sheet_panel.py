@@ -5,6 +5,7 @@ from PyQt6.QtWidgets import (
     QFrame, QSplitter, QComboBox, QTableWidget, QTableWidgetItem,
     QHeaderView, QScrollArea, QSizePolicy, QAbstractItemView,
     QTabWidget, QStyledItemDelegate, QStyleOptionViewItem,
+    QListWidget, QListWidgetItem,
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QRect
 from PyQt6.QtGui import QFont, QColor, QPainter, QPen
