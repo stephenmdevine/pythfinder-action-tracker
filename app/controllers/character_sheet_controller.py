@@ -404,3 +404,50 @@ class CharacterSheetController(BaseController):
         except Exception as e:
             return {"success": False, "data": [], "message": str(e)}
 
+    def get_feats_and_abilities(self, character_id: int) -> dict:
+        """
+        Returns character sources grouped into display categories for the
+        Feats & Abilities tab. Groups:
+          - Feats           (category_name = 'Feat')
+          - Class Features  (category_name = 'Class Feature')
+          - Racial Abilities (category_name = 'Racial Ability')
+          - Other           (everything else that isn't Condition/Other combat modifier)
+
+        Each item: source_id, character_source_id, name, description,
+                   category_name, duration_type, is_active
+        """
+        _EXCLUDED = {"Condition", "Other"}
+        _GROUP_ORDER = ["Feat", "Class Feature", "Racial Ability"]
+
+        try:
+            rows = self.source_model.get_character_sources(character_id)
+
+            grouped: dict[str, list[dict]] = {}
+            for row in rows:
+                cat = row.get("category_name", "Other")
+                if cat in _EXCLUDED:
+                    continue
+                grouped.setdefault(cat, [])
+                grouped[cat].append(row)
+
+            # Build ordered output: known groups first, then remainder alphabetically
+            ordered = []
+            seen = set()
+            for cat in _GROUP_ORDER:
+                if cat in grouped:
+                    ordered.append({
+                        "category": cat,
+                        "items": sorted(grouped[cat], key=lambda r: r["name"]),
+                    })
+                    seen.add(cat)
+            for cat in sorted(grouped):
+                if cat not in seen:
+                    ordered.append({
+                        "category": cat,
+                        "items": sorted(grouped[cat], key=lambda r: r["name"]),
+                    })
+
+            return {"success": True, "data": ordered, "message": ""}
+        except Exception as e:
+            return {"success": False, "data": [], "message": str(e)}
+

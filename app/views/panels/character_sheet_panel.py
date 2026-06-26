@@ -871,6 +871,171 @@ class SkillTable(QTableWidget):
         if row < len(self._row_data):
             self.skill_selected.emit(self._row_data[row])
 
+
+# ---------------------------------------------------------------------------
+# FEATS & ABILITIES TAB
+# ---------------------------------------------------------------------------
+
+class FeatAbilityTab(QWidget):
+    """
+    Displays character sources grouped by category (Feat, Class Feature,
+    Racial Ability, and any others). Selecting a row populates a detail
+    pane on the right showing the full description.
+
+    Layout: left list (name + category badge) | right detail card
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._build_ui()
+
+    # ------------------------------------------------------------------
+    # BUILD
+    # ------------------------------------------------------------------
+
+    def _build_ui(self):
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        splitter.setHandleWidth(4)
+        splitter.addWidget(self._build_list_pane())
+        splitter.addWidget(self._build_detail_pane())
+        splitter.setSizes([340, 260])
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        root.addWidget(splitter)
+
+    def _build_list_pane(self) -> QWidget:
+        pane = QWidget()
+        layout = QVBoxLayout(pane)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._list = QListWidget()
+        self._list.setObjectName("feat_list")
+        self._list.setSpacing(1)
+        self._list.currentItemChanged.connect(self._on_item_changed)
+        layout.addWidget(self._list)
+        return pane
+
+    def _build_detail_pane(self) -> QWidget:
+        pane = QWidget()
+        pane.setMinimumWidth(220)
+        pane.setStyleSheet(f"background-color: {palette['bg_surface']};")
+        layout = QVBoxLayout(pane)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self._detail_name = QLabel("Select an ability")
+        self._detail_name.setStyleSheet(f"""
+            color: {palette['turquoise']};
+            font-size: 13px;
+            font-weight: bold;
+            padding: 12px 14px 6px 14px;
+            border-bottom: 1px solid {palette['border']};
+            background-color: {palette['bg_surface']};
+        """)
+        self._detail_name.setWordWrap(True)
+        layout.addWidget(self._detail_name)
+
+        self._detail_cat = QLabel("")
+        self._detail_cat.setStyleSheet(f"""
+            color: {palette['text_muted']};
+            font-size: 10px;
+            font-weight: bold;
+            letter-spacing: 1px;
+            padding: 4px 14px 4px 14px;
+            background-color: {palette['bg_surface']};
+        """)
+        layout.addWidget(self._detail_cat)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        desc_container = QWidget()
+        desc_layout = QVBoxLayout(desc_container)
+        desc_layout.setContentsMargins(14, 8, 14, 14)
+
+        self._detail_desc = QLabel("No description available.")
+        self._detail_desc.setWordWrap(True)
+        self._detail_desc.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._detail_desc.setStyleSheet(
+            f"color: {palette['text_secondary']}; font-size: 12px; line-height: 1.5;"
+        )
+        desc_layout.addWidget(self._detail_desc)
+        desc_layout.addStretch()
+
+        scroll.setWidget(desc_container)
+        layout.addWidget(scroll, stretch=1)
+
+        return pane
+
+    # ------------------------------------------------------------------
+    # PUBLIC
+    # ------------------------------------------------------------------
+
+    def populate(self, groups: list[dict]):
+        """
+        groups: list of {"category": str, "items": [source_row, ...]}
+        """
+        self._list.clear()
+        self._detail_name.setText("Select an ability")
+        self._detail_cat.setText("")
+        self._detail_desc.setText("No description available.")
+
+        for group in groups:
+            cat = group["category"]
+            items = group["items"]
+            if not items:
+                continue
+
+            # Category header item — not selectable
+            header_item = QListWidgetItem(cat.upper())
+            header_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            header_item.setForeground(QColor(palette["turquoise"]))
+            f = QFont("Segoe UI", 9, QFont.Weight.Bold)
+            header_item.setFont(f)
+            header_item.setBackground(QColor(palette["bg_dark"]))
+            self._list.addItem(header_item)
+
+            for source in items:
+                name = source.get("name", "")
+                item = QListWidgetItem(f"  {name}")
+                item.setData(Qt.ItemDataRole.UserRole, source)
+                item.setForeground(QColor(palette["text_primary"]))
+                self._list.addItem(item)
+
+        if self._list.count() == 0:
+            empty = QListWidgetItem("No feats or abilities recorded yet.")
+            empty.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            empty.setForeground(QColor(palette["text_muted"]))
+            self._list.addItem(empty)
+
+    def clear(self):
+        self._list.clear()
+        self._detail_name.setText("Select an ability")
+        self._detail_cat.setText("")
+        self._detail_desc.setText("No description available.")
+
+    # ------------------------------------------------------------------
+    # PRIVATE
+    # ------------------------------------------------------------------
+
+    def _on_item_changed(self, current: QListWidgetItem, _prev):
+        if not current:
+            return
+        source = current.data(Qt.ItemDataRole.UserRole)
+        if not isinstance(source, dict):
+            return  # header row
+
+        self._detail_name.setText(source.get("name", ""))
+        self._detail_cat.setText(source.get("category_name", "").upper())
+        desc = source.get("description", "").strip()
+        self._detail_desc.setText(desc if desc else "No description recorded.")
+
 # ---------------------------------------------------------------------------
 # MAIN PANEL
 # ---------------------------------------------------------------------------
@@ -1057,6 +1222,10 @@ class CharacterSheetPanel(QWidget):
 
         self._center_tabs.addTab(skills_widget, "Skills")
 
+        # ── Feats & Abilities tab ──────────────────────────────────────
+        self._feat_tab = FeatAbilityTab()
+        self._center_tabs.addTab(self._feat_tab, "Feats & Abilities")
+
         return self._center_tabs
 
     def _build_right_pane(self) -> QWidget:
@@ -1109,6 +1278,7 @@ class CharacterSheetPanel(QWidget):
         if not result["success"]:
             self._header_card.clear()
             self._stat_table.populate([])
+            self._feat_tab.clear()
             self._breakdown_pane.clear()
             self._btn_set_active.setEnabled(False)
             return
@@ -1132,6 +1302,13 @@ class CharacterSheetPanel(QWidget):
             self._skill_table.populate(skill_result["data"])
         else:
             self._skill_table.clear_skills()
+
+        # Feats & abilities tab
+        feat_result = self._controller.get_feats_and_abilities(character_id)
+        if feat_result["success"]:
+            self._feat_tab.populate(feat_result["data"])
+        else:
+            self._feat_tab.clear()
 
         # Clear breakdown (no row selected yet)
         self._breakdown_pane.clear()
@@ -1186,6 +1363,7 @@ class CharacterSheetPanel(QWidget):
             self._header_card.clear()
             self._stat_table.populate([])
             self._skill_table.clear_skills()
+            self._feat_tab.clear()
             self._breakdown_pane.clear()
             return
         self._load_character(character_id)
